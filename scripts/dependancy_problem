@@ -1,0 +1,12 @@
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+albucore 0.0.17 requires numpy>=1.24, but you have numpy 1.23.3 which is incompatible.
+albumentations 1.4.18 requires numpy>=1.24.4, but you have numpy 1.23.3 which is incompatible.
+gr00t 1.1.0 requires numpy<2.0.0,>=1.23.5, but you have numpy 1.23.3 which is incompatible.
+gr00t 1.1.0 requires protobuf==3.20.3, but you have protobuf 3.19.6 which is incompatible.
+gr00t 1.1.0 requires tianshou==0.5.1, but you have tianshou 0.4.10 which is incompatible.
+numpydantic 1.6.7 requires numpy>=1.24.0, but you have numpy 1.23.3 which is incompatible.
+onnx 1.15.0 requires protobuf>=3.20.2, but you have protobuf 3.19.6 which is incompatible.
+robosuite 1.5.1 requires mujoco>=3.3.0, but you have mujoco 3.2.6 which is incompatible.
+scikit-image 0.25.2 requires numpy>=1.24, but you have numpy 1.23.3 which is incompatible.
+tensorflow 2.15.0 requires numpy<2.0.0,>=1.23.5, but you have numpy 1.23.3 which is incompatible.
+tensorflow 2.15.0 requires protobuf!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<5.0.0dev,>=3.20.3, but you have protobuf 3.19.6 which is incompatible.
