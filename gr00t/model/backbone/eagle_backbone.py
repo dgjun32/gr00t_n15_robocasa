@@ -18,6 +18,7 @@ import torch
 from torch import nn
 from transformers import AutoConfig, AutoModel
 from transformers.feature_extraction_utils import BatchFeature
+import torch.nn.functional as F
 
 import gr00t
 
@@ -38,11 +39,13 @@ class EagleBackbone(nn.Module):
         load_bf16: bool = False,
         eagle_path: str | None = None,
         project_to_dim: int = 1536,
+        save_embeddings: bool = False,
     ):
         """
         Args:
             tune_llm: whether to tune the LLM model (default: True)
             tune_visual: whether to tune the visual model (default: False)
+            save_embeddings: whether to save embeddings for analysis (default: False)
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
@@ -61,6 +64,10 @@ class EagleBackbone(nn.Module):
 
         self.select_layer = select_layer
         self.set_trainable_parameters(tune_llm, tune_visual)
+        
+        # Embedding saving functionality
+        self.save_embeddings = save_embeddings
+        self.saved_embeddings = []
 
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool):
         self.tune_llm = tune_llm
@@ -114,7 +121,40 @@ class EagleBackbone(nn.Module):
         print(f"eagle_features.shape: {eagle_features.shape}")
 
         eagle_features = self.eagle_linear(eagle_features)
+        print(f"eagle_features.shape (after linear): {eagle_features.shape}")
+
+        # Save embeddings if requested
+        if self.save_embeddings:
+            # Save the mean pooled embedding for easier comparison
+            attention_mask = eagle_input["attention_mask"]
+            # Apply attention mask and compute mean
+            masked_features = eagle_features * attention_mask.unsqueeze(-1)
+            pooled_embedding = masked_features.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
+            self.saved_embeddings.append(pooled_embedding.detach().cpu())
+
         return eagle_features, eagle_input["attention_mask"]
+
+    def get_saved_embeddings(self):
+        """Return all saved embeddings as a single tensor."""
+        if not self.saved_embeddings:
+            return None
+        return torch.cat(self.saved_embeddings, dim=0)
+    
+    def clear_saved_embeddings(self):
+        """Clear all saved embeddings."""
+        self.saved_embeddings = []
+    
+    def compute_cosine_similarity_matrix(self):
+        """Compute cosine similarity matrix for all saved embeddings."""
+        if not self.saved_embeddings:
+            return None
+        
+        embeddings = self.get_saved_embeddings()
+        # Normalize embeddings
+        normalized_embeddings = F.normalize(embeddings, p=2, dim=1)
+        # Compute cosine similarity matrix
+        similarity_matrix = torch.mm(normalized_embeddings, normalized_embeddings.t())
+        return similarity_matrix
 
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
