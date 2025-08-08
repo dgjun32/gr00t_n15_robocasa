@@ -157,8 +157,19 @@ class DatasetManager:
 
         if verbose:
             print("\n--- Processing Metadata Files ---")
-        self._merge_all_meta_files(
+        # Merge meta files and build mapping from local task indices to global merged indices
+        mapping_per_dataset, name_to_global = self._merge_all_meta_files(
             dataset_paths, meta_dst_dir, actual_episode_counts_per_dataset, actual_frame_counts_per_dataset, verbose
+        )
+
+        # After tasks.jsonl merged and global mapping known, remap task-related columns in copied Parquets
+        self._remap_task_indices_in_parquets(
+            output_dir=output_dir,
+            chunk_paths=chunk_paths,
+            actual_episode_counts=actual_episode_counts_per_dataset,
+            local_to_global_mappings=mapping_per_dataset,
+            name_to_global=name_to_global,
+            verbose=verbose,
         )
 
         if verbose:
@@ -246,6 +257,10 @@ class DatasetManager:
         for p in [ep_out, tasks_out, info_out]:
             p.unlink(missing_ok=True)
 
+        # Build mapping structures
+        mapping_per_dataset: List[Dict[int, int]] = []  # per dataset: local task_index -> global task_index
+        name_to_global: Dict[str, int] = {}  # task name -> global task_index
+
         for i, dataset_path in enumerate(dataset_paths):
             src_meta_dir = dataset_path / "meta"
             eps_in_this_ds_for_meta = actual_episode_counts[i]
@@ -253,6 +268,7 @@ class DatasetManager:
                 if verbose:
                     print(f"  Warning: Meta dir {src_meta_dir} not found.")
                 current_meta_episode_offset += eps_in_this_ds_for_meta
+                mapping_per_dataset.append({})
                 continue
 
             # SKIP THIS: calculate episode_stats in training GR00T-N1
@@ -290,21 +306,31 @@ class DatasetManager:
                         )
                 self.write_jsonl(base_data + new_data, ep_out)
 
-            # Merge tasks.jsonl
-            num_new_tasks = 0
+            # Merge tasks.jsonl and build mappings
             src_tasks = src_meta_dir / "tasks.jsonl"
+            local_to_global: Dict[int, int] = {}
             if src_tasks.exists():
                 base_tasks = self.read_jsonl(tasks_out) if tasks_out.exists() else []
+                # Build current global name->index map from base_tasks
+                if base_tasks:
+                    for r in base_tasks:
+                        name_to_global[r["task"]] = r["task_index"]
                 new_tasks = self.read_jsonl(src_tasks)[:actual_episode_counts[i]]
-                existing_task_names = {r["task"]: r["task_index"] for r in base_tasks}
-                next_idx = max(existing_task_names.values()) + 1 if existing_task_names else 0
+                # Determine next index
+                next_idx = max(name_to_global.values()) + 1 if name_to_global else 0
                 for r_new in new_tasks:
-                    if r_new["task"] not in existing_task_names:
-                        base_tasks.append({"task": r_new["task"], "task_index": next_idx})
-                        existing_task_names[r_new["task"]] = next_idx
+                    tname = r_new["task"]
+                    if tname not in name_to_global:
+                        name_to_global[tname] = next_idx
+                        base_tasks.append({"task": tname, "task_index": next_idx})
                         next_idx += 1
-                        num_new_tasks += 1
+                    # Map local -> global for this dataset
+                    local_to_global[r_new["task_index"]] = name_to_global[tname]
+                # Persist updated global tasks file
                 self.write_jsonl(sorted(base_tasks, key=lambda x: x["task_index"]), tasks_out)
+            else:
+                if verbose:
+                    print(f"  Warning: tasks.jsonl not found in {src_meta_dir}, skipping task mapping.")
 
             # Merge info.json
             src_info = src_meta_dir / "info.json"
@@ -330,7 +356,7 @@ class DatasetManager:
                 merged_info["total_episodes"] = merged_info.get("total_episodes", 0) + actual_episode_counts[i]
                 merged_info["total_frames"] = merged_info.get("total_frames", 0) + actual_frame_counts[i]
                 merged_info["total_chunks"] = merged_info.get("total_chunks", 0) + 1
-                merged_info["total_tasks"] = merged_info.get("total_tasks", 0) + num_new_tasks
+                merged_info["total_tasks"] = merged_info.get("total_tasks", 0) + (len(local_to_global) if local_to_global else 0)
 
                 info_out.write_text(json.dumps(merged_info, indent=2))
 
@@ -344,7 +370,10 @@ class DatasetManager:
                     merged_modality[k] = v
                 modality_out.write_text(json.dumps(merged_modality, indent=2))
 
+            mapping_per_dataset.append(local_to_global)
             current_meta_episode_offset += eps_in_this_ds_for_meta
+
+        return mapping_per_dataset, name_to_global
 
     def _copy_all_videos_for_merge(
         self,
@@ -646,6 +675,71 @@ class DatasetManager:
 
         if verbose:
             print(f"    {path.name} updated.")
+
+    def _remap_task_indices_in_parquets(
+        self,
+        output_dir: Path,
+        chunk_paths: List[str],
+        actual_episode_counts: List[int],
+        local_to_global_mappings: List[Dict[int, int]],
+        name_to_global: Dict[str, int],
+        verbose: bool = False,
+    ) -> None:
+        """
+        After tasks.jsonl is merged (global task indices assigned),
+        rewrite copied Parquet files so that:
+          - 'task_index' column (if present) is remapped from local -> global indices
+          - 'annotation.human.action.task_description' column (if present) is also remapped to global indices
+            (supports integer indices; if strings detected, map by name_to_global when possible)
+        """
+        ANNOTATION_KEY = "annotation.human.action.task_description"
+        for i, chunk_name in enumerate(chunk_paths):
+            data_dir = output_dir / "data" / chunk_name
+            if not data_dir.exists():
+                if verbose:
+                    print(f"  Skipping remap: data dir not found {data_dir}")
+                continue
+            mapping = local_to_global_mappings[i] if i < len(local_to_global_mappings) else {}
+            if not mapping:
+                if verbose:
+                    print(f"  No task mapping for dataset chunk {chunk_name}, skipping remap.")
+                continue
+
+            parquet_files = self._natural_sort_paths(data_dir.glob("episode_*.parquet"))[: actual_episode_counts[i]]
+            for pq_path in parquet_files:
+                try:
+                    df = pd.read_parquet(pq_path)
+
+                    # Remap 'task_index' if present
+                    if "task_index" in df.columns:
+                        try:
+                            if pd.api.types.is_integer_dtype(df["task_index"]) or pd.api.types.is_numeric_dtype(df["task_index"]):
+                                df["task_index"] = df["task_index"].map(lambda x: mapping.get(int(x), x))
+                            else:
+                                # If task_index somehow stored as object/str, try to coerce and map
+                                df["task_index"] = pd.to_numeric(df["task_index"], errors="ignore").map(
+                                    lambda x: mapping.get(int(x), x) if isinstance(x, (int, float)) and not pd.isna(x) else x
+                                )
+                        except Exception as e:
+                            if verbose:
+                                print(f"    Warning: failed remapping 'task_index' in {pq_path.name}: {e}")
+
+                    # Remap annotation column if present
+                    if ANNOTATION_KEY in df.columns:
+                        col = df[ANNOTATION_KEY]
+                        try:
+                            if pd.api.types.is_integer_dtype(col) or pd.api.types.is_numeric_dtype(col):
+                                df[ANNOTATION_KEY] = col.map(lambda x: mapping.get(int(x), x))
+                            elif pd.api.types.is_string_dtype(col) or col.dtype == object:
+                                # If strings, map by task name -> global idx when possible
+                                df[ANNOTATION_KEY] = col.map(lambda s: name_to_global.get(str(s), s))
+                        except Exception as e:
+                            if verbose:
+                                print(f"    Warning: failed remapping '{ANNOTATION_KEY}' in {pq_path.name}: {e}")
+
+                    df.to_parquet(pq_path, index=False)
+                except Exception as e:
+                    print(f"  Error remapping task indices in {pq_path}: {e}")
 
 
 """
