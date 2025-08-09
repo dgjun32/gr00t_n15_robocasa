@@ -113,15 +113,15 @@ class EagleBackbone(nn.Module):
         }
         del eagle_input["image_sizes"]
 
-        print(f"eagle_input.keys: {eagle_input.keys()}")
-        print(f"eagle_input['pixel_values']: {eagle_input['pixel_values'].shape}")
+        # print(f"eagle_input.keys: {eagle_input.keys()}")
+        # print(f"eagle_input['pixel_values']: {eagle_input['pixel_values'].shape}")
 
         eagle_output = self.eagle_model(**eagle_input, output_hidden_states=True, return_dict=True)
         eagle_features = eagle_output.hidden_states[self.select_layer]
-        print(f"eagle_features.shape: {eagle_features.shape}")
+        # print(f"eagle_features.shape: {eagle_features.shape}")
 
         eagle_features = self.eagle_linear(eagle_features)
-        print(f"eagle_features.shape (after linear): {eagle_features.shape}")
+        # print(f"eagle_features.shape (after linear): {eagle_features.shape}")
 
         # Save embeddings if requested
         if self.save_embeddings:

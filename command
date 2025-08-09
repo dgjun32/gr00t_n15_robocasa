@@ -16,11 +16,34 @@ python scripts/gr00t_finetune.py \
     --batch-size 4 \
     --save-steps 1000
 
+# Tasklist
+CloseDoubleDoor 0.0 / 0.0 / 0.04
+OpenDoubleDoor 0.0 / 0.0 / 
+CoffeeServeMug 0.03 / 0.03 / 0.04
+CoffeeSetupMug 0.0 / 0.0 / 0.0
+PnPCabToCounter 0.0 / 0.0
+PnPCounterToCab 0.0 / 0.0
+TurnOffSinkFaucet 0.10 / 0.10
+TurnOnSinkFaucet 0.03 / 0.01
+
+
 conda activate gr00t_rc
+CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
+    --model_path checkpoint/0808/checkpoint-30000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name TurnOnSinkFaucet \
+    --num_episodes 100 \
+    --data_collection_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_dataset/TurnOnSinkFaucet \
+    --video_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_video_30k_0809/TurnOnSinkFaucet \
+    --max_episode_steps 1000 \
+    2>&1 | tee ./logs_inference_0809_30k/TurnOnSinkFaucet_$(date +%Y%m%d_%H%M%S).log
 
 
-CUDA_VISIBLE_DEVICES=3 python scripts/eval_policy_robocasa.py \
-    --model_path gr00t_ckpt/0801/checkpoint-30000 \
+CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
+    --model_path /home/sinjaekang/sinjae/slurm_h/gr00tn15_robocasa \
     --action_horizon 16 \
     --video_backend decord \
     --dataset_path 0801_robocasa_multitask_sj_300 \
@@ -33,3 +56,9 @@ CUDA_VISIBLE_DEVICES=3 python scripts/eval_policy_robocasa.py \
 
   # [1, 813, 2048]
   # CloseDoubleDoor, OpenDoubleDoor, CoffeeServeMug, CoffeeSetupMug, PnPCabToCounter, PnPCounterToCab, TurnOffSinkFaucet, TurnOnSinkFaucet
+    --num_episodes 100 \
+    --data_collection_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_dataset/TurnOnSinkFaucet \
+    --video_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_video_prev/TurnOnSinkFaucet \
+    --max_episode_steps 2000 \
+    2>&1 | tee ./logs_inference_0808_prev/TurnOnSinkFaucet_$(date +%Y%m%d_%H%M%S).log 
+    

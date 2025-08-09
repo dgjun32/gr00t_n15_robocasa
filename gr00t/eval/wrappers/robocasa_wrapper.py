@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -17,6 +17,7 @@ def load_robocasa_gym_env(
     collect_freq: int = 1,
     flush_freq: int = 100,
     render_onscreen: bool = False,
+    layout_and_style_ids: Optional[List[Tuple[int, int]]] = None,
     layout_ids: Optional[Union[int, List[int]]] = None,
     style_ids: Optional[List[int]] = None,
 ):
@@ -27,6 +28,7 @@ def load_robocasa_gym_env(
         camera_widths=256,
         camera_heights=256,
         generative_textures=generative_textures,
+        layout_and_style_ids=layout_and_style_ids,
         layout_ids=layout_ids,
         style_ids=style_ids,
     )

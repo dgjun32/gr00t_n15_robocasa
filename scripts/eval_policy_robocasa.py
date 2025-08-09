@@ -300,18 +300,14 @@ if __name__ == "__main__":
         help="Path to save the data collection",
     )
     parser.add_argument(
-        "--layout",
+        "--layout_and_style_ids",
         type=int,
         nargs="+",
-        default=[1, 2, 4, 6, 7],
-        help="Floor plan layout IDs. Default matches RoboCasa eval set: [1,2,4,6,7]. Use -1 to let env choose randomly.",
-    )
-    parser.add_argument(
-        "--style",
-        type=int,
-        nargs="+",
-        default=[1, 2, 4, 9, 10],
-        help="Style IDs. Default matches RoboCasa eval set: [1,2,4,9,10].",
+        default=[1, 1, 2, 2, 4, 4, 6, 9, 7, 10],
+        help=(
+            "Flattened pairs of (layout_id, style_id): l1 s1 l2 s2 ... (length must be even). "
+            "Default: (1,1) (2,2) (4,4) (6,9) (7,10)."
+        ),
     )
     parser.add_argument("--generative_textures", action="store_true", help="Use generative textures")
 
@@ -396,8 +392,8 @@ if __name__ == "__main__":
                 "Specifying 'obj_groups' in non-kitchen environment does not have an effect."
             )
     else:
-        config["layout_ids"] = args.layout
-        config["style_ids"] = args.style
+        # store paired eval setup in meta config for record-keeping
+        config["layout_and_style_ids"] = args.layout_and_style_ids
         ### update config for kitchen envs ###
         if args.obj_groups is not None:
             config.update({"obj_groups": args.obj_groups})
@@ -412,20 +408,19 @@ if __name__ == "__main__":
     # Grab reference to controller config and convert it to json-encoded string
     env_info = json.dumps(config)
 
+    # Parse flattened layout_and_style_ids into list of (layout, style) pairs
+    flat_ls = args.layout_and_style_ids
+    assert len(flat_ls) % 2 == 0, "--layout_and_style_ids must contain an even number of integers (layout style ...)"
+    layout_and_style_pairs = [(int(flat_ls[i]), int(flat_ls[i + 1])) for i in range(0, len(flat_ls), 2)]
+
     env = load_robocasa_gym_env(
         args.env_name,
         seed=args.seed,
         directory=Path(args.data_collection_path),
         generative_textures="100p" if args.generative_textures else None,
-        layout_ids=(
-            None
-            if (
-                (isinstance(args.layout, int) and args.layout == -1)
-                or (isinstance(args.layout, list) and len(args.layout) == 1 and args.layout[0] == -1)
-            )
-            else args.layout
-        ),
-        style_ids=args.style,
+        layout_and_style_ids=layout_and_style_pairs,
+        layout_ids=None,
+        style_ids=None,
     )
     env = RoboCasaWrapper(env)
     env = TimeLimit(env, max_episode_steps=args.max_episode_steps)
