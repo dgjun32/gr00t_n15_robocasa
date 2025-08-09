@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import List, Optional, Union
 
 import gymnasium as gym
 import numpy as np
@@ -16,6 +17,8 @@ def load_robocasa_gym_env(
     collect_freq: int = 1,
     flush_freq: int = 100,
     render_onscreen: bool = False,
+    layout_ids: Optional[Union[int, List[int]]] = None,
+    style_ids: Optional[List[int]] = None,
 ):
     env = create_env(
         env_name=env_name,
@@ -24,8 +27,10 @@ def load_robocasa_gym_env(
         camera_widths=256,
         camera_heights=256,
         generative_textures=generative_textures,
+        layout_ids=layout_ids,
+        style_ids=style_ids,
     )
-    if directory is not None and directory.exists():
+    if directory is not None:
         directory.mkdir(parents=True, exist_ok=True)
     env = DataCollectionWrapper(env, directory, collect_freq=collect_freq, flush_freq=flush_freq)
     env = GymWrapper(
@@ -158,6 +163,7 @@ class RoboCasaWrapper(gym.Wrapper):
             if key in self._robocasa_keys_to_gr00t_keys:
                 new_obs[self._robocasa_keys_to_gr00t_keys[key]] = value
         new_obs["annotation.human.action.task_description"] = [self.language_instruction]
+        # print("task : ", new_obs["annotation.human.action.task_description"])
         info["is_success"] = self.is_success()["task"]
         terminated = terminated or info["is_success"]
         return new_obs, reward, terminated, truncated, info

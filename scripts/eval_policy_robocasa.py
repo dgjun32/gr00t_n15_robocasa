@@ -299,9 +299,19 @@ if __name__ == "__main__":
         default=None,
         help="Path to save the data collection",
     )
-    parser.add_argument("--layout", type=int, nargs="+", default=-1)
     parser.add_argument(
-        "--style", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 11]
+        "--layout",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 6, 7],
+        help="Floor plan layout IDs. Default matches RoboCasa eval set: [1,2,4,6,7]. Use -1 to let env choose randomly.",
+    )
+    parser.add_argument(
+        "--style",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 9, 10],
+        help="Style IDs. Default matches RoboCasa eval set: [1,2,4,9,10].",
     )
     parser.add_argument("--generative_textures", action="store_true", help="Use generative textures")
 
@@ -333,32 +343,32 @@ if __name__ == "__main__":
     print(modality)
 
     # Create the dataset
-    dataset = LeRobotSingleDataset(
-        dataset_path=args.dataset_path,
-        modality_configs=modality,
-        video_backend=args.video_backend,
-        video_backend_kwargs=None,
-        transforms=None,  # We'll handle transforms separately through the policy
-        embodiment_tag=args.embodiment_tag,
-    )
+    # dataset = LeRobotSingleDataset(
+    #     dataset_path=args.dataset_path,
+    #     modality_configs=modality,
+    #     video_backend=args.video_backend,
+    #     video_backend_kwargs=None,
+    #     transforms=None,  # We'll handle transforms separately through the policy
+    #     embodiment_tag=args.embodiment_tag,
+    # )
 
-    print(len(dataset))
-    # Make a prediction
-    obs = dataset[0]
-    for k, v in obs.items():
-        if isinstance(v, np.ndarray):
-            print(k, v.shape)
-        else:
-            print(k, v)
+    # print(len(dataset))
+    # # Make a prediction
+    # obs = dataset[0]
+    # for k, v in obs.items():
+    #     if isinstance(v, np.ndarray):
+    #         print(k, v.shape)
+    #     else:
+    #         print(k, v)
 
-    for k, v in dataset.get_step_data(0, 0).items():
-        if isinstance(v, np.ndarray):
-            print(k, v.shape)
-        else:
-            print(k, v)
+    # for k, v in dataset.get_step_data(0, 0).items():
+    #     if isinstance(v, np.ndarray):
+    #         print(k, v.shape)
+    #     else:
+    #         print(k, v)
 
-    print("Total trajectories:", len(dataset.trajectory_lengths))
-    print("All trajectories:", dataset.trajectory_lengths)
+    # print("Total trajectories:", len(dataset.trajectory_lengths))
+    # print("All trajectories:", dataset.trajectory_lengths)
 
     # load robocasa env
     controller_config = load_composite_controller_config(
@@ -407,6 +417,15 @@ if __name__ == "__main__":
         seed=args.seed,
         directory=Path(args.data_collection_path),
         generative_textures="100p" if args.generative_textures else None,
+        layout_ids=(
+            None
+            if (
+                (isinstance(args.layout, int) and args.layout == -1)
+                or (isinstance(args.layout, list) and len(args.layout) == 1 and args.layout[0] == -1)
+            )
+            else args.layout
+        ),
+        style_ids=args.style,
     )
     env = RoboCasaWrapper(env)
     env = TimeLimit(env, max_episode_steps=args.max_episode_steps)
@@ -444,7 +463,22 @@ if __name__ == "__main__":
         done = False
         step = 0
         while not done:
+            def summarize_np(x):
+                return dict(
+                    shape=getattr(x, "shape", None),
+                    dtype=getattr(x, "dtype", None),
+                    any_nan=np.isnan(x).any() if isinstance(x, np.ndarray) and np.issubdtype(x.dtype, np.number) else False,
+                    any_inf=np.isinf(x).any() if isinstance(x, np.ndarray) and np.issubdtype(x.dtype, np.number) else False,
+                    min=(np.nanmin(x) if isinstance(x, np.ndarray) and x.size and np.issubdtype(x.dtype, np.number) else None),
+                    max=(np.nanmax(x) if isinstance(x, np.ndarray) and x.size and np.issubdtype(x.dtype, np.number) else None),
+                )
+
+            print("=== OBS SUMMARY ===")
+            for k, v in obs.items():
+                print(k, summarize_np(v))
             action = policy.get_action(obs)
+            print("updated action", action)
+
             post_action = postprocess_action(action)
             next_obs, reward, terminated, truncated, info = env.step(post_action)
             done = terminated or truncated
@@ -457,11 +491,11 @@ if __name__ == "__main__":
 
     env.close()
 
-    print("Change collected data to hdf5 format")
-    hdf5_path = gather_demonstrations_as_hdf5(
-        args.data_collection_path, args.data_collection_path, env_info
-    )
-    convert_to_robomimic_format(hdf5_path)
+    # print("Change collected data to hdf5 format")
+    # hdf5_path = gather_demonstrations_as_hdf5(
+    #     args.data_collection_path, args.data_collection_path, env_info
+    # )
+    # convert_to_robomimic_format(hdf5_path)
 
     for k, v in stats.items():
         stats[k] = np.mean(v)
