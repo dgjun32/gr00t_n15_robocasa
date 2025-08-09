@@ -31,6 +31,7 @@ def load_robocasa_gym_env(
         layout_and_style_ids=layout_and_style_ids,
         layout_ids=layout_ids,
         style_ids=style_ids,
+        obj_instance_split="A",
     )
     if directory is not None:
         directory.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,11 @@ class RoboCasaWrapper(gym.Wrapper):
             "robot0_agentview_left_image": "video.left_view",
             "robot0_agentview_right_image": "video.right_view",
             "robot0_eye_in_hand_image": "video.wrist_view",
+        }
+        self._image_keys = {
+            "robot0_agentview_left_image",
+            "robot0_agentview_right_image",
+            "robot0_eye_in_hand_image",
         }
 
         self._observation_space = self._convert_observation_space()
@@ -128,6 +134,8 @@ class RoboCasaWrapper(gym.Wrapper):
         new_obs = {}
         for key, value in obs.items():
             if key in self._robocasa_keys_to_gr00t_keys:
+                if key in self._image_keys: 
+                    value = value[::-1]
                 new_obs[self._robocasa_keys_to_gr00t_keys[key]] = value
         new_obs["annotation.human.action.task_description"] = [self.language_instruction]
         info["is_success"] = self.is_success()["task"]
@@ -163,6 +171,8 @@ class RoboCasaWrapper(gym.Wrapper):
         new_obs = {}
         for key, value in obs.items():
             if key in self._robocasa_keys_to_gr00t_keys:
+                if key in self._image_keys:
+                    value = value[::-1]
                 new_obs[self._robocasa_keys_to_gr00t_keys[key]] = value
         new_obs["annotation.human.action.task_description"] = [self.language_instruction]
         # print("task : ", new_obs["annotation.human.action.task_description"])
