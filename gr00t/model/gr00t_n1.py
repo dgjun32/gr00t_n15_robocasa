@@ -183,6 +183,41 @@ class GR00T_N1_5(PreTrainedModel):
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
 
+    def get_action_cfg(
+        self,
+        inputs: dict,
+        inputs_uncond: dict,
+        cfg_mode: str = None,
+        cfg_scale: float = 2.0,
+    ) -> BatchFeature:
+        """
+        Get action with Conditional Free Guidance.
+        
+        Args:
+            inputs: Conditional inputs (with instruction)
+            inputs_uncond: Unconditional inputs (empty instruction)
+            cfg_mode: "action" for final action CFG, "embedding" for model output CFG, None for no CFG
+            cfg_scale: CFG scale factor
+            
+        Returns:
+            BatchFeature with action prediction
+        """
+        # Prepare conditional inputs
+        backbone_inputs, action_inputs = self.prepare_input(inputs)
+        backbone_outputs = self.backbone(backbone_inputs)
+        
+        # Prepare unconditional inputs
+        backbone_inputs_uncond, _ = self.prepare_input(inputs_uncond)
+        backbone_outputs_uncond = self.backbone(backbone_inputs_uncond)
+
+        # Get CFG action from action head
+        action_head_outputs = self.action_head.get_action_cfg(
+            backbone_outputs, action_inputs, backbone_outputs_uncond, cfg_mode, cfg_scale
+        )
+        
+        self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+        return action_head_outputs
+
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)
         backbone_inputs = self.backbone.prepare_input(inputs)

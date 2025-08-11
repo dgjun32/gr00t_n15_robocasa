@@ -185,10 +185,63 @@ class Gr00tPolicy(BasePolicy):
             unnormalized_action = squeeze_dict_values(unnormalized_action)
         return unnormalized_action
 
+    def get_action_cfg(self, observations: Dict[str, Any], observations_uncond: Dict[str, Any], 
+                      cfg_mode: str = None, cfg_scale: float = 2.0) -> Dict[str, Any]:
+        """
+        Make a prediction with the model using Conditional Free Guidance.
+        
+        Args:
+            observations: Conditional observations (with instruction)
+            observations_uncond: Unconditional observations (empty instruction)
+            cfg_mode: "action" for final action CFG, "embedding" for model output CFG, None for no CFG
+            cfg_scale: CFG scale factor
+            
+        Returns:
+            Dict[str, Any]: The predicted action with CFG applied.
+        """
+        # Handle batching for both conditional and unconditional inputs
+        is_batch = self._check_state_is_batched(observations)
+        if not is_batch:
+            observations = unsqueeze_dict_values(observations)
+            observations_uncond = unsqueeze_dict_values(observations_uncond)
+
+        # Ensure keys are all in numpy array for both inputs
+        for k, v in observations.items():
+            if not isinstance(v, np.ndarray):
+                observations[k] = np.array(v)
+        
+        for k, v in observations_uncond.items():
+            if not isinstance(v, np.ndarray):
+                observations_uncond[k] = np.array(v)
+
+        # Apply transforms to both inputs
+        normalized_input = self.apply_transforms(observations)
+        normalized_input_uncond = self.apply_transforms(observations_uncond)
+
+        # Get CFG action from model
+        normalized_action = self._get_action_cfg_from_normalized_input(
+            normalized_input, normalized_input_uncond, cfg_mode, cfg_scale
+        )
+        unnormalized_action = self._get_unnormalized_action(normalized_action)
+
+        if not is_batch:
+            unnormalized_action = squeeze_dict_values(unnormalized_action)
+        return unnormalized_action
+
     def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any]) -> torch.Tensor:
         # Set up autocast context if needed
         with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
             model_pred = self.model.get_action(normalized_input)
+
+        normalized_action = model_pred["action_pred"].float()
+        return normalized_action
+
+    def _get_action_cfg_from_normalized_input(self, normalized_input: Dict[str, Any], 
+                                            normalized_input_uncond: Dict[str, Any],
+                                            cfg_mode: str, cfg_scale: float) -> torch.Tensor:
+        # Set up autocast context if needed
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+            model_pred = self.model.get_action_cfg(normalized_input, normalized_input_uncond, cfg_mode, cfg_scale)
 
         normalized_action = model_pred["action_pred"].float()
         return normalized_action
