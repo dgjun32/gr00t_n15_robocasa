@@ -9,8 +9,8 @@ Clone the robocasa-compatible repository:
 ```sh
 git clone https://github.com/sinnnj/Issac-GR00T-robocasa.git 
 cd Isaac-GR00T-robocasa
-conda create -n gr00t_rc_test python=3.10
-conda activate gr00t_rc_test
+conda create -n gr00t_rc python=3.10
+conda activate gr00t_rc
 pip install --upgrade setuptools
 pip install -e .[base]
 pip install --no-build-isolation flash-attn==2.7.1.post4 
