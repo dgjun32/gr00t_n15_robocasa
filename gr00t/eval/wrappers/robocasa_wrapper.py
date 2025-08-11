@@ -13,7 +13,6 @@ def load_robocasa_gym_env(
     env_name,
     seed=None,
     generative_textures: str = None,
-    directory: Path = None,
     collect_freq: int = 1,
     flush_freq: int = 100,
     render_onscreen: bool = False,
@@ -33,9 +32,7 @@ def load_robocasa_gym_env(
         style_ids=style_ids,
         obj_instance_split="A",
     )
-    if directory is not None:
-        directory.mkdir(parents=True, exist_ok=True)
-    env = DataCollectionWrapper(env, directory, collect_freq=collect_freq, flush_freq=flush_freq)
+
     env = GymWrapper(
         env,
         flatten_obs=False,
@@ -187,7 +184,7 @@ class RoboCasaWrapper(gym.Wrapper):
 if __name__ == "__main__":
     env_name = "PnPCounterToMicrowave"
 
-    env = load_robocasa_gym_env(env_name, directory=Path("./tmp_data/"), collect_freq=1, flush_freq=1)
+    env = load_robocasa_gym_env(env_name, collect_freq=1, flush_freq=1)
     env = RoboCasaWrapper(env)
 
     obs, _ = env.reset()

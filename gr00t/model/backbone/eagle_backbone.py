@@ -123,11 +123,10 @@ class EagleBackbone(nn.Module):
         eagle_features = self.eagle_linear(eagle_features)
         # print(f"eagle_features.shape (after linear): {eagle_features.shape}")
 
-        # Save embeddings if requested
+        # Save embeddings if requested (mean pooled for easier comparison)
         if self.save_embeddings:
-            # Save the mean pooled embedding for easier comparison
             attention_mask = eagle_input["attention_mask"]
-            # Apply attention mask and compute mean
+            # Apply attention mask and compute mean pooling
             masked_features = eagle_features * attention_mask.unsqueeze(-1)
             pooled_embedding = masked_features.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
             self.saved_embeddings.append(pooled_embedding.detach().cpu())

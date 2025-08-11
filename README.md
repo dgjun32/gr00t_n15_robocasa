@@ -1,3 +1,90 @@
+## Robocasa Installation Guide
+
+For setting up the robocasa simulation environment with GR00T:
+
+### 1. GR00T Environment Setup
+
+Clone the robocasa-compatible repository:
+
+```sh
+git clone https://github.com/sinnnj/Issac-GR00T-robocasa.git 
+cd Isaac-GR00T-robocasa
+conda create -n gr00t_rc_test python=3.10
+conda activate gr00t_rc_test
+pip install --upgrade setuptools
+pip install -e .[base]
+pip install --no-build-isolation flash-attn==2.7.1.post4 
+```
+
+### 2. Robosuite and Robocasa Installation
+
+```sh
+git clone https://github.com/ARISE-Initiative/robosuite
+cd robosuite
+pip install -e .
+cd ..
+git clone https://github.com/robocasa/robocasa
+cd robocasa
+pip install -e .
+```
+
+### 3. Download Assets
+
+```sh
+# Caution: Assets to be downloaded are around 5GB
+python robocasa/scripts/download_kitchen_assets.py   
+python robocasa/scripts/setup_macros.py              # Set up system variables
+```
+
+### 4. Troubleshooting
+
+#### For VAST Platform:
+
+```sh
+pip install protobuf==3.20.3
+pip install tianshou==0.5.1
+pip install gymnasium[other]
+pip install numpy==1.23.3
+
+# For OSMesa rendering
+apt-get install -y libosmesa6-dev
+export MUJOCO_GL=osmesa
+
+# For EGL rendering
+apt-get update && apt-get install -y libegl1-mesa-dev libgl1-mesa-glx libgles2-mesa-dev
+```
+
+#### For Alin slurm Platform:
+
+```sh
+conda install --force-reinstall pytz
+conda install --force-reinstall six
+conda install --force-reinstall idna
+conda install --force-reinstall certifi
+pip install --upgrade protobuf
+```
+
+### 5. Example Evaluation Command
+
+After installation, you can run robocasa evaluation with the following example command:
+
+```sh
+CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
+    --model_path checkpoint/robocasa8_b256_visual/checkpoint-30000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name PnPCabToCounter \
+    --num_episodes 100 \
+    --data_collection_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_dataset/PnPCabToCounter \
+    --video_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_video_visual_30k_0810/PnPCabToCounter \
+    --max_episode_steps 1000 \
+    2>&1 | tee ./logs_inference_0810_visual_30k/PnPCabToCounter$(date +%Y%m%d_%H%M%S).log
+```
+
+---
+
 <div align="center">
 
 
@@ -83,7 +170,7 @@ GR00T N1.5 is intended for researchers and professionals in humanoid robotics. T
 - Adapt the model to specific robotics tasks with minimal data
 - Deploy the model for inference
 
-The focus is on enabling customization of robot behaviors through finetuning.
+  The focus is on enabling customization of robot behaviors through finetuning.
 
 ## Prerequisites
 
