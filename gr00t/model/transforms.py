@@ -117,7 +117,7 @@ class GR00TTransform(InvertibleModalityTransform):
     eagle_processor: ProcessorMixin = Field(default=build_eagle_processor(DEFAULT_EAGLE_PATH))
 
     # XEmbDiT arguments
-    default_instruction: str = Field(default="Perform the default behavior.")
+    default_instruction: str = Field(default="")
     max_state_dim: int
     max_action_dim: int
     state_horizon: int

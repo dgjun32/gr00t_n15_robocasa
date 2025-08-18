@@ -125,6 +125,9 @@ class ArgsConfig:
     num_demos: int | None = None
     """Number of demos to use for training. If None, use all demos."""
 
+    language_dropout_prob: float = 0.0
+    """Probability of dropping language instruction to empty string during training."""
+
 
 #####################################################################################
 # main training function
@@ -140,6 +143,12 @@ def main(config: ArgsConfig):
     data_config_cls = DATA_CONFIG_MAP[config.data_config]
     modality_configs = data_config_cls.modality_config()
     transforms = data_config_cls.transform()
+    
+    # Set language dropout probability on GR00TTransform
+    for transform in transforms.transforms:
+        if hasattr(transform, 'language_dropout_prob'):
+            transform.language_dropout_prob = config.language_dropout_prob
+            print(f"Set language_dropout_prob to {config.language_dropout_prob}")
 
     # 1.2 data loader: we will use either single dataset or mixture dataset
     if len(config.dataset_path) == 1:
@@ -247,7 +256,7 @@ def main(config: ArgsConfig):
         output_dir=config.output_dir,
         run_name=None,
         remove_unused_columns=False,
-        deepspeed="zero2_config.json",
+        deepspeed="",
         gradient_checkpointing=False,
         bf16=True,
         tf32=True,
