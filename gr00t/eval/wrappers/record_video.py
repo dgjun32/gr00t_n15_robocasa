@@ -147,7 +147,7 @@ class RecordVideo(gym.Wrapper[ObsType, ActType, ObsType, ActType], gym.utils.Rec
         self.render_history: list[RenderFrame] = []
 
         self.step_id = -1
-        self.episode_id = -1
+        self.episode_id = 0
 
         try:
             import moviepy  # noqa: F401
