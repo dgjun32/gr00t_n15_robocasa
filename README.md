@@ -77,7 +77,6 @@ CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
     --data_config single_panda_gripper \
     --env_name PnPCabToCounter \
     --num_episodes 100 \
-    --data_collection_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_dataset/PnPCabToCounter \
     --video_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_video_visual_30k_0810/PnPCabToCounter \
     --max_episode_steps 1000 \
     2>&1 | tee ./logs_inference_0810_visual_30k/PnPCabToCounter$(date +%Y%m%d_%H%M%S).log
