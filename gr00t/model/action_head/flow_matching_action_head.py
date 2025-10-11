@@ -220,6 +220,16 @@ class FlowmatchingActionHead(nn.Module):
         # Model output saving functionality
         self.save_model_outputs = False
         self.saved_model_outputs = []
+        
+        # Velocity tracking functionality for CFG analysis
+        self.save_velocity_analysis = True
+        self.velocity_analysis_data = {
+            'dt_values': [],
+            'pred_velocities': [],
+            'pred_velocities_uncond': [],  # Only for action mode
+            'velocity_cos_sims': [],  # Cosine similarities between consecutive velocities
+            'cond_uncond_cos_sims': []  # Only for action mode: cos sim between cond and uncond
+        }
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
         self.tune_projector = tune_projector
@@ -452,6 +462,10 @@ class FlowmatchingActionHead(nn.Module):
             # No CFG, use regular get_action
             return self.get_action(backbone_output, action_input)
         
+        # Clear previous velocity analysis data if tracking is enabled
+        if self.save_velocity_analysis:
+            self.clear_velocity_analysis()
+        
         # Process both conditional and unconditional backbone outputs
         backbone_output = self.process_backbone_output(backbone_output)
         backbone_output_uncond = self.process_backbone_output(backbone_output_uncond)
@@ -525,6 +539,35 @@ class FlowmatchingActionHead(nn.Module):
                 pred = self.action_decoder(cfg_model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
                 
+                # Save velocity analysis data for embedding mode
+                if self.save_velocity_analysis:
+                    self.velocity_analysis_data['dt_values'].append(dt)
+                    self.velocity_analysis_data['pred_velocities'].append(pred_velocity.detach().cpu())
+                    
+                    print(f"[CFG-Embedding] Step {t}/{num_steps}: dt={dt:.10f}, pred_velocity_norm={pred_velocity.norm().item():.10f}", flush=True)
+                    
+                    # Compute cosine similarity with previous velocity if available
+                    if len(self.velocity_analysis_data['pred_velocities']) > 1:
+                        prev_velocity = self.velocity_analysis_data['pred_velocities'][-2]  # Previous timestep
+                        curr_velocity = self.velocity_analysis_data['pred_velocities'][-1]  # Current timestep (just added)
+                        
+                        # Check if they are the same tensor
+                        diff_norm = (prev_velocity - curr_velocity).norm().item()                        
+                        # Compute cosine similarity per timestep and then average
+                        prev_float = prev_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
+                        curr_float = curr_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
+                        
+                        # Cosine similarity per timestep: [B, action_horizon]
+                        cos_sim_per_timestep = F.cosine_similarity(prev_float, curr_float, dim=2, eps=1e-8)
+                        print(f"[DEBUG] cos_sim_per_timestep shape: {cos_sim_per_timestep.shape}")
+                        print(f"[DEBUG] cos_sim_per_timestep: {cos_sim_per_timestep}")
+                        
+                        # Average across timesteps and batches
+                        cos_sim = cos_sim_per_timestep.mean().item()
+                        
+                        self.velocity_analysis_data['velocity_cos_sims'].append(cos_sim)
+                        print(f"[CFG-Embedding] Step {t}/{num_steps}: velocity_cos_sim={cos_sim:.10f}", flush=True)
+                
             elif cfg_mode == "action":
                 # Apply CFG to final actions after action decoder
                 pred_cond = self.action_decoder(model_output_cond, embodiment_id)
@@ -535,6 +578,48 @@ class FlowmatchingActionHead(nn.Module):
                 
                 # Apply CFG to final actions
                 pred_velocity = cfg_scale * pred_velocity_cond - (cfg_scale - 1) * pred_velocity_uncond
+                
+                # Save velocity analysis data for action mode
+                if self.save_velocity_analysis:
+                    self.velocity_analysis_data['dt_values'].append(dt)
+                    self.velocity_analysis_data['pred_velocities'].append(pred_velocity.detach().cpu())
+                    self.velocity_analysis_data['pred_velocities_uncond'].append(pred_velocity_uncond.detach().cpu())
+                    
+                    print(f"[CFG-Action] Step {t}/{num_steps}: dt={dt:.10f}, pred_velocity_norm={pred_velocity.norm().item():.10f}, pred_velocity_uncond_norm={pred_velocity_uncond.norm().item():.10f}", flush=True)
+                    
+                    # Compute cosine similarity between conditional and unconditional velocities per timestep
+                    cond_float = pred_velocity_cond.to(torch.float32)  # [B, action_horizon, action_dim]
+                    uncond_float = pred_velocity_uncond.to(torch.float32)  # [B, action_horizon, action_dim]
+
+                    # print("Cond_float : ", cond_float[0][0])
+                    # print("Uncond_float : ", uncond_float[0][0])
+
+                    cond_uncond_cos_sim_per_timestep = F.cosine_similarity(cond_float, uncond_float, dim=2, eps=1e-8)
+                    cond_uncond_cos_sim = cond_uncond_cos_sim_per_timestep.mean().item()
+                    self.velocity_analysis_data['cond_uncond_cos_sims'].append(cond_uncond_cos_sim)
+                    print(f"[CFG-Action] Step {t}/{num_steps}: cond_uncond_cos_sim={cond_uncond_cos_sim:.10f}", flush=True)
+                    
+                    # Compute cosine similarity with previous velocity if available
+                    if len(self.velocity_analysis_data['pred_velocities']) > 1:
+                        prev_velocity = self.velocity_analysis_data['pred_velocities'][-2]  # Previous timestep
+                        curr_velocity = self.velocity_analysis_data['pred_velocities'][-1]  # Current timestep (just added)
+
+                        # print("Prev_velocity : ", prev_velocity)
+                        # print("Curr_velocity : ", curr_velocity)
+                        
+                        # Check if they are the same tensor
+                        diff_norm = (prev_velocity - curr_velocity).norm().item()
+                        # print(f"[DEBUG-Action] Difference norm between prev and curr: {diff_norm:.10f}")
+                        
+                        # Compute cosine similarity per timestep and then average
+                        prev_float = prev_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
+                        curr_float = curr_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
+                        
+                        # Cosine similarity per timestep: [B, action_horizon]
+                        cos_sim_per_timestep = F.cosine_similarity(prev_float, curr_float, dim=2, eps=1e-8)
+                        cos_sim = cos_sim_per_timestep.mean().item()
+                        self.velocity_analysis_data['velocity_cos_sims'].append(cos_sim)
+                        print(f"[CFG-Action] Step {t}/{num_steps}: velocity_cos_sim={cos_sim:.10f}", flush=True)
             
             else:
                 raise ValueError(f"Invalid cfg_mode: {cfg_mode}. Must be 'action', 'embedding', or None")
@@ -553,6 +638,28 @@ class FlowmatchingActionHead(nn.Module):
         if not self.saved_model_outputs:
             return None
         return torch.cat(self.saved_model_outputs, dim=0)
+    
+    def clear_velocity_analysis(self):
+        """Clear all velocity analysis data."""
+        self.velocity_analysis_data = {
+            'dt_values': [],
+            'pred_velocities': [],
+            'pred_velocities_uncond': [],
+            'velocity_cos_sims': [],
+            'cond_uncond_cos_sims': []
+        }
+    
+    def get_velocity_analysis(self):
+        """Return velocity analysis data."""
+        return self.velocity_analysis_data
+    
+    def enable_velocity_analysis(self):
+        """Enable velocity tracking for CFG analysis."""
+        self.save_velocity_analysis = True
+    
+    def disable_velocity_analysis(self):
+        """Disable velocity tracking for CFG analysis."""
+        self.save_velocity_analysis = False
 
     @property
     def device(self):

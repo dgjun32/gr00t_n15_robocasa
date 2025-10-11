@@ -76,22 +76,9 @@ def modify_obs_for_empty_instruction(obs):
     
     # Specific language key for task description
     task_description_key = "annotation.human.action.task_description"
-    if task_description_key in obs_empty:
-        if isinstance(obs_empty[task_description_key], str):
-            obs_empty[task_description_key] = ""
-        elif isinstance(obs_empty[task_description_key], np.ndarray) and obs_empty[task_description_key].dtype.kind in ['U', 'S']:
-            # String array
-            obs_empty[task_description_key] = np.array([""] * len(obs_empty[task_description_key]), dtype=obs_empty[task_description_key].dtype)
-    
-    # Find and replace other text instruction fields as fallback
-    for key in obs_empty.keys():
-        if 'instruction' in key.lower() or 'text' in key.lower() or 'lang' in key.lower():
-            if isinstance(obs_empty[key], str):
-                obs_empty[key] = ""
-            elif isinstance(obs_empty[key], np.ndarray) and obs_empty[key].dtype.kind in ['U', 'S']:
-                # String array
-                obs_empty[key] = np.array([""] * len(obs_empty[key]), dtype=obs_empty[key].dtype)
-    
+    empty_string = ""
+    obs_empty[task_description_key] = [empty_string]
+    print(f"Obs_empty[task_description_key] : {obs_empty[task_description_key]}")
     return obs_empty
 
 
@@ -298,10 +285,10 @@ if __name__ == "__main__":
     # main evaluation loop
     stats = defaultdict(list)
     for i in trange(args.num_episodes):
+        obs, info = env.reset()
         pbar = tqdm(
             total=args.max_episode_steps, desc=f"Episode {i + 1} / {env.unwrapped.get_ep_meta()['lang']}", leave=False
         )
-        obs, info = env.reset()
         done = False
         step = 0
         while not done:
