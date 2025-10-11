@@ -128,6 +128,9 @@ class ArgsConfig:
     language_dropout_prob: float = 0.0
     """Probability of dropping language instruction to empty string during training."""
 
+    image_dropout_prob: float = 0.0
+    """Probability of dropping image input to zeros (unconditional) during training."""
+
 
 #####################################################################################
 # main training function
@@ -144,11 +147,14 @@ def main(config: ArgsConfig):
     modality_configs = data_config_cls.modality_config()
     transforms = data_config_cls.transform()
     
-    # Set language dropout probability on GR00TTransform
+    # Set language and image dropout probability on GR00TTransform
     for transform in transforms.transforms:
         if hasattr(transform, 'language_dropout_prob'):
             transform.language_dropout_prob = config.language_dropout_prob
             print(f"Set language_dropout_prob to {config.language_dropout_prob}")
+        if hasattr(transform, 'image_dropout_prob'):
+            transform.image_dropout_prob = config.image_dropout_prob
+            print(f"Set image_dropout_prob to {config.image_dropout_prob}")
 
     # 1.2 data loader: we will use either single dataset or mixture dataset
     if len(config.dataset_path) == 1:
