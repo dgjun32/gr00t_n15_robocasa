@@ -316,8 +316,10 @@ class GR00TTransform(InvertibleModalityTransform):
                 rand_val = random.random()
                 if rand_val < self.language_dropout_prob:
                     apply_language_dropout = True
+                    print("Language dropout applied", flush=True)
                 elif rand_val < total_dropout_prob:
                     apply_image_dropout = True
+                    print("Image dropout applied", flush=True)
 
         # 1) Prepare video and language with vlm processing.
         images = self._prepare_video(data, force_dropout=apply_image_dropout)
