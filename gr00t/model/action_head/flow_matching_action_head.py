@@ -214,6 +214,11 @@ class FlowmatchingActionHead(nn.Module):
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
+        
+        # Prior distribution std (default: 1.0 for standard normal)
+        # Can be overridden at runtime via policy.py
+        self.prior_std = 1.0
+        
         self.config = config
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
         
@@ -393,12 +398,7 @@ class FlowmatchingActionHead(nn.Module):
             size=(batch_size, self.config.action_horizon, self.config.action_dim),
             dtype=vl_embs.dtype,
             device=device,
-        )
-        actions = torch.zeros(
-            size=(batch_size, self.config.action_horizon, self.config.action_dim),
-            dtype=vl_embs.dtype,
-            device=device,
-        )
+        ) * self.prior_std  # Apply prior std
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
@@ -492,7 +492,7 @@ class FlowmatchingActionHead(nn.Module):
             size=(batch_size, self.config.action_horizon, self.config.action_dim),
             dtype=vl_embs.dtype,
             device=device,
-        )
+        ) * self.prior_std  # Apply prior std
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps

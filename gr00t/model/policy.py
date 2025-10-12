@@ -69,6 +69,8 @@ class Gr00tPolicy(BasePolicy):
         modality_config: Dict[str, ModalityConfig],
         modality_transform: ComposedModalityTransform,
         denoising_steps: Optional[int] = None,
+        diffusion_mode: Optional[str] = None,
+        prior_variance: Optional[float] = None,
         device: Union[int, str] = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         """
@@ -80,6 +82,8 @@ class Gr00tPolicy(BasePolicy):
             modality_transform (ComposedModalityTransform): The modality transform for the model.
             embodiment_tag (Union[str, EmbodimentTag]): The embodiment tag for the model.
             denoising_steps: Number of denoising steps to use for the action head.
+            diffusion_mode: Diffusion sampling mode ('ddim' or 'ddpm'). Only applicable for diffusion action head.
+            prior_variance: Variance of the prior distribution for initial actions (default: 1.0).
             device (Union[int, str]): Device to run the model on.
         """
         try:
@@ -111,12 +115,37 @@ class Gr00tPolicy(BasePolicy):
         # Load horizons
         self._load_horizons()
 
+        # Set denoising steps if provided
         if denoising_steps is not None:
             if hasattr(self.model, "action_head") and hasattr(
                 self.model.action_head, "num_inference_timesteps"
             ):
                 self.model.action_head.num_inference_timesteps = denoising_steps
                 print(f"Set action denoising steps to {denoising_steps}")
+        
+        # Set diffusion mode if provided (ddim or ddpm)
+        if diffusion_mode is not None:
+            if hasattr(self.model, "action_head") and hasattr(self.model.action_head, "use_ddim"):
+                if diffusion_mode.lower() == "ddim":
+                    self.model.action_head.use_ddim = True
+                    print(f"Set diffusion mode to DDIM (deterministic)")
+                elif diffusion_mode.lower() == "ddpm":
+                    self.model.action_head.use_ddim = False
+                    print(f"Set diffusion mode to DDPM (stochastic)")
+                else:
+                    print(f"Warning: Unknown diffusion_mode '{diffusion_mode}'. Use 'ddim' or 'ddpm'.")
+            else:
+                print(f"Warning: Model action_head does not support diffusion_mode (not a diffusion action head)")
+        
+        # Set prior variance if provided
+        if prior_variance is not None:
+            if hasattr(self.model, "action_head"):
+                import math
+                prior_std = math.sqrt(prior_variance)
+                self.model.action_head.prior_std = prior_std
+                print(f"Set prior variance to {prior_variance} (std={prior_std:.4f})")
+            else:
+                print(f"Warning: Model does not have action_head")
 
     def apply_transforms(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """

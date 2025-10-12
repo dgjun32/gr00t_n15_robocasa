@@ -226,6 +226,10 @@ class DiffusionActionHead(nn.Module):
         # Sampling method: DDIM (deterministic) or DDPM (stochastic)
         self.use_ddim = False  # Set to False for DDPM stochastic sampling
         
+        # Prior distribution std (default: 1.0 for standard normal)
+        # Can be overridden at runtime via policy.py
+        self.prior_std = 1.0
+        
         self.config = config
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
         
@@ -443,17 +447,17 @@ class DiffusionActionHead(nn.Module):
             size=(batch_size, self.config.action_horizon, self.config.action_dim),
             dtype=vl_embs.dtype,
             device=device,
-        )
+        ) * self.prior_std  # Apply prior std
 
-        # num_steps = self.num_inference_timesteps
-        num_steps = 10 # for testing
+        num_steps = self.num_inference_timesteps
+        # num_steps = 10 # for testing
         
         # DDPM/DDIM sampling
         # Create timestep schedule for inference
         timestep_indices = torch.linspace(self.num_timestep_buckets - 1, 0, num_steps, dtype=torch.long, device=device)
 
         # Run denoising steps (reverse process)
-        # print(f"Running {num_steps} denoising steps...", flush=True)
+        print(f"Running {num_steps} denoising steps...", flush=True)
         for i, t_idx in enumerate(timestep_indices):
             t_idx = t_idx.item()
             
@@ -540,7 +544,7 @@ class DiffusionActionHead(nn.Module):
             else:
                 # Final step: return predicted x0
                 actions = pred_x0
-        print(f"actions: {actions}", flush=True)
+        # print(f"actions: {actions}", flush=True)
         return BatchFeature(data={"action_pred": actions})
 
     @torch.no_grad()
@@ -586,7 +590,7 @@ class DiffusionActionHead(nn.Module):
             size=(batch_size, self.config.action_horizon, self.config.action_dim),
             dtype=vl_embs.dtype,
             device=device,
-        )
+        ) * self.prior_std  # Apply prior std
 
         num_steps = self.num_inference_timesteps
         
