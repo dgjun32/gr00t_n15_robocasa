@@ -64,8 +64,8 @@ class ArgsConfig:
     base_model_path: str = "nvidia/GR00T-N1.5-3B"
     """Path or HuggingFace model ID for the base model."""
 
-    action_head_type: Literal["flowmatching", "diffusion"] = "flowmatching"
-    """Type of action head to use: 'flowmatching' or 'diffusion'."""
+    action_head_type: Literal["flowmatching", "diffusion", "regression"] = "flowmatching"
+    """Type of action head to use: 'flowmatching', 'diffusion', or 'regression'."""
 
     tune_llm: bool = False
     """Whether to fine-tune the language model backbone."""
@@ -245,6 +245,15 @@ def main(config: ArgsConfig):
             # Create new config from old config dict, DiffusionActionHeadConfig will use defaults for missing keys
             new_action_head_config = DiffusionActionHeadConfig(**old_config_dict)
             new_action_head = DiffusionActionHead(new_action_head_config)
+            
+        elif config.action_head_type == "regression":
+            from gr00t.model.action_head.regression_action_head import (
+                RegressionActionHead,
+                RegressionActionHeadConfig,
+            )
+            # Create new config from old config dict
+            new_action_head_config = RegressionActionHeadConfig(**old_config_dict)
+            new_action_head = RegressionActionHead(new_action_head_config)
         else:
             raise ValueError(f"Unknown action_head_type: {config.action_head_type}")
         
@@ -285,6 +294,13 @@ def main(config: ArgsConfig):
             )
             new_action_head_config = DiffusionActionHeadConfig(**config_dict)
             new_action_head = DiffusionActionHead(new_action_head_config)
+        elif current_type == "regression":
+            from gr00t.model.action_head.regression_action_head import (
+                RegressionActionHead,
+                RegressionActionHeadConfig,
+            )
+            new_action_head_config = RegressionActionHeadConfig(**config_dict)
+            new_action_head = RegressionActionHead(new_action_head_config)
         else:
             raise ValueError(f"Unknown action_head_type: {current_type}")
         

@@ -135,7 +135,7 @@ class DiffusionActionHeadConfig(PretrainedConfig):
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
     num_inference_timesteps: int = field(
-        default=None,
+        default=200,
         metadata={"help": "Number of inference steps for noise diffusion."},
     )
     prediction_type: str = field(
@@ -222,6 +222,9 @@ class DiffusionActionHead(nn.Module):
         
         # Precompute noise schedule
         self._initialize_noise_schedule(config)
+        
+        # Sampling method: DDIM (deterministic) or DDPM (stochastic)
+        self.use_ddim = False  # Set to False for DDPM stochastic sampling
         
         self.config = config
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
@@ -442,13 +445,15 @@ class DiffusionActionHead(nn.Module):
             device=device,
         )
 
-        num_steps = self.num_inference_timesteps
+        # num_steps = self.num_inference_timesteps
+        num_steps = 10 # for testing
         
         # DDPM/DDIM sampling
         # Create timestep schedule for inference
         timestep_indices = torch.linspace(self.num_timestep_buckets - 1, 0, num_steps, dtype=torch.long, device=device)
 
         # Run denoising steps (reverse process)
+        # print(f"Running {num_steps} denoising steps...", flush=True)
         for i, t_idx in enumerate(timestep_indices):
             t_idx = t_idx.item()
             
@@ -490,31 +495,52 @@ class DiffusionActionHead(nn.Module):
             # DDPM update rule
             alpha_prod_t = self.alphas_cumprod[t_idx]
             
+            # Add small epsilon to prevent division by zero
+            eps = 1e-8
+            
             if self.prediction_type == "epsilon":
-                # Predict x0 from noise prediction
-                pred_x0 = (actions - torch.sqrt(1 - alpha_prod_t) * pred_noise_or_x0) / torch.sqrt(alpha_prod_t)
+                # Clamp predicted noise to prevent extreme values
+                pred_noise_or_x0 = torch.clamp(pred_noise_or_x0, -10.0, 10.0)
+                
+                # Predict x0 from noise prediction (with epsilon for numerical stability)
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                
+                pred_x0 = (actions - sqrt_one_minus_alpha_prod_t * pred_noise_or_x0) / sqrt_alpha_prod_t
             elif self.prediction_type == "sample":
                 # Direct x0 prediction
                 pred_x0 = pred_noise_or_x0
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
             
-            # Clamp predicted x0 (optional, can help stability)
-            # pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            # Clamp predicted x0 to action space (critical for stability!)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
             
             # Get next timestep
             if i < len(timestep_indices) - 1:
                 next_t_idx = timestep_indices[i + 1].item()
                 alpha_prod_t_prev = self.alphas_cumprod[next_t_idx]
                 
-                # DDPM formula: x_{t-1} = sqrt(alpha_{t-1}) * pred_x0 + sqrt(1 - alpha_{t-1}) * noise
-                # For deterministic sampling (DDIM-like), we can skip the noise term
-                noise = torch.randn_like(actions)
-                actions = torch.sqrt(alpha_prod_t_prev) * pred_x0 + torch.sqrt(1 - alpha_prod_t_prev) * noise
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                sqrt_alpha_prod_t_prev = torch.sqrt(alpha_prod_t_prev.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t_prev = torch.sqrt((1 - alpha_prod_t_prev).clamp(min=eps))
+                
+                if self.use_ddim:
+                    # DDIM (deterministic): use predicted direction
+                    epsilon_t = (actions - sqrt_alpha_prod_t * pred_x0) / sqrt_one_minus_alpha_prod_t
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * epsilon_t
+                else:
+                    # DDPM (stochastic): add random noise
+                    noise = torch.randn_like(actions)
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * noise
+                
+                # Clamp actions to prevent explosion
+                actions = torch.clamp(actions, -10.0, 10.0)
             else:
                 # Final step: return predicted x0
                 actions = pred_x0
-                
+        print(f"actions: {actions}", flush=True)
         return BatchFeature(data={"action_pred": actions})
 
     @torch.no_grad()
@@ -683,23 +709,48 @@ class DiffusionActionHead(nn.Module):
             # DDPM update rule
             alpha_prod_t = self.alphas_cumprod[t_idx]
             
+            # Add small epsilon to prevent division by zero
+            eps = 1e-8
+            
             if self.prediction_type == "epsilon":
-                # Predict x0 from noise prediction
-                pred_x0 = (actions - torch.sqrt(1 - alpha_prod_t) * pred_noise_or_x0) / torch.sqrt(alpha_prod_t)
+                # Clamp predicted noise to prevent extreme values
+                pred_noise_or_x0 = torch.clamp(pred_noise_or_x0, -10.0, 10.0)
+                
+                # Predict x0 from noise prediction (with epsilon for numerical stability)
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                
+                pred_x0 = (actions - sqrt_one_minus_alpha_prod_t * pred_noise_or_x0) / sqrt_alpha_prod_t
             elif self.prediction_type == "sample":
                 # Direct x0 prediction
                 pred_x0 = pred_noise_or_x0
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
             
+            # Clamp predicted x0 to action space (critical for stability!)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            
             # Get next timestep
             if i < len(timestep_indices) - 1:
                 next_t_idx = timestep_indices[i + 1].item()
                 alpha_prod_t_prev = self.alphas_cumprod[next_t_idx]
                 
-                # DDPM formula
-                noise = torch.randn_like(actions)
-                actions = torch.sqrt(alpha_prod_t_prev) * pred_x0 + torch.sqrt(1 - alpha_prod_t_prev) * noise
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                sqrt_alpha_prod_t_prev = torch.sqrt(alpha_prod_t_prev.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t_prev = torch.sqrt((1 - alpha_prod_t_prev).clamp(min=eps))
+                
+                if self.use_ddim:
+                    # DDIM (deterministic): use predicted direction
+                    epsilon_t = (actions - sqrt_alpha_prod_t * pred_x0) / sqrt_one_minus_alpha_prod_t
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * epsilon_t
+                else:
+                    # DDPM (stochastic): add random noise
+                    noise = torch.randn_like(actions)
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * noise
+                
+                # Clamp actions to prevent explosion
+                actions = torch.clamp(actions, -10.0, 10.0)
             else:
                 # Final step: return predicted x0
                 actions = pred_x0

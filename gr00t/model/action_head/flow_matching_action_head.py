@@ -394,6 +394,11 @@ class FlowmatchingActionHead(nn.Module):
             dtype=vl_embs.dtype,
             device=device,
         )
+        actions = torch.zeros(
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs.dtype,
+            device=device,
+        )
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
@@ -440,6 +445,8 @@ class FlowmatchingActionHead(nn.Module):
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
+            
+        # print(f"actions: {actions}", flush=True)
         return BatchFeature(data={"action_pred": actions})
 
     @torch.no_grad()
