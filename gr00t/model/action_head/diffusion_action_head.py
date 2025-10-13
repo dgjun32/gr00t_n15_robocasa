@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -104,8 +103,8 @@ class MultiEmbodimentActionEncoder(nn.Module):
 
 
 @dataclass
-class FlowmatchingActionHeadConfig(PretrainedConfig):
-    """NOTE: N1.5 uses XEmbFlowmatchingPolicyHeadConfig as action head"""
+class DiffusionActionHeadConfig(PretrainedConfig):
+    """Diffusion-based action head configuration"""
 
     add_pos_embed: bool = field(
         default=True, metadata={"help": "Whether to add positional embedding"}
@@ -125,18 +124,24 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     max_seq_len: int = field(default=1024, metadata={"help": "Maxium Sequence Length"})
     action_dim: int = field(default=None, metadata={"help": "Action dimension."})
     action_horizon: int = field(default=None, metadata={"help": "Action horizon."})
-    noise_beta_alpha: float = field(default=1.5, metadata={"help": ""})
-    noise_beta_beta: float = field(default=1.0, metadata={"help": ""})
-    noise_s: float = field(
-        default=0.999, metadata={"help": "Flow matching noise Beta distribution s."}
+    
+    # Diffusion-specific parameters
+    noise_schedule_type: str = field(
+        default="cosine", metadata={"help": "Noise schedule type: 'linear' or 'cosine'"}
     )
+    beta_start: float = field(default=0.0001, metadata={"help": "Starting beta for linear schedule"})
+    beta_end: float = field(default=0.02, metadata={"help": "Ending beta for linear schedule"})
     num_timestep_buckets: int = field(
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
     num_inference_timesteps: int = field(
-        default=None,
+        default=200,
         metadata={"help": "Number of inference steps for noise diffusion."},
     )
+    prediction_type: str = field(
+        default="epsilon", metadata={"help": "Prediction type: 'epsilon' (noise) or 'sample' (x0)"}
+    )
+    
     max_num_embodiments: int = field(default=32, metadata={"help": "Number of embodiments."})
     tune_projector: bool = field(default=True, metadata={"help": "Whether to tune the projector."})
     tune_diffusion_model: bool = field(
@@ -162,13 +167,13 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
             setattr(self, key, value)
 
 
-class FlowmatchingActionHead(nn.Module):
-    config_class = FlowmatchingActionHeadConfig
+class DiffusionActionHead(nn.Module):
+    config_class = DiffusionActionHeadConfig
     supports_gradient_checkpointing = True
 
     def __init__(
         self,
-        config: FlowmatchingActionHeadConfig,
+        config: DiffusionActionHeadConfig,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -196,8 +201,6 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
-        # self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
-        # nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
 
         self.vlln = (
             nn.LayerNorm(config.backbone_embedding_dim) if config.use_vlln else nn.Identity()
@@ -212,8 +215,16 @@ class FlowmatchingActionHead(nn.Module):
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
             nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
 
-        self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
+        # Diffusion noise schedule
         self.num_timestep_buckets = config.num_timestep_buckets
+        self.noise_schedule_type = config.noise_schedule_type
+        self.prediction_type = config.prediction_type
+        
+        # Precompute noise schedule
+        self._initialize_noise_schedule(config)
+        
+        # Sampling method: DDIM (deterministic) or DDPM (stochastic)
+        self.use_ddim = False  # Set to False for DDPM stochastic sampling
         
         # Prior distribution std (default: 1.0 for standard normal)
         # Can be overridden at runtime via policy.py
@@ -230,11 +241,40 @@ class FlowmatchingActionHead(nn.Module):
         self.save_velocity_analysis = True
         self.velocity_analysis_data = {
             'dt_values': [],
-            'pred_velocities': [],
-            'pred_velocities_uncond': [],  # Only for action mode
-            'velocity_cos_sims': [],  # Cosine similarities between consecutive velocities
-            'cond_uncond_cos_sims': []  # Only for action mode: cos sim between cond and uncond
+            'pred_noises': [],
+            'pred_noises_uncond': [],
+            'noise_cos_sims': [],
+            'cond_uncond_cos_sims': []
         }
+
+    def _initialize_noise_schedule(self, config):
+        """Initialize diffusion noise schedule (alpha_bar_t)"""
+        timesteps = config.num_timestep_buckets
+        
+        if config.noise_schedule_type == "linear":
+            # Linear beta schedule
+            betas = torch.linspace(config.beta_start, config.beta_end, timesteps)
+            alphas = 1.0 - betas
+            alphas_cumprod = torch.cumprod(alphas, dim=0)
+            
+        elif config.noise_schedule_type == "cosine":
+            # Cosine schedule (Nichol & Dhariwal, 2021)
+            def cosine_schedule(t):
+                s = 0.008  # offset
+                f_t = torch.cos(((t / timesteps + s) / (1 + s)) * torch.pi / 2) ** 2
+                return f_t
+            
+            steps = torch.arange(timesteps + 1, dtype=torch.float32)
+            alphas_cumprod = cosine_schedule(steps) / cosine_schedule(torch.tensor([0.0]))
+            alphas_cumprod = alphas_cumprod[1:]  # Remove the extra element
+            
+        else:
+            raise ValueError(f"Unknown noise schedule type: {config.noise_schedule_type}")
+        
+        # Register as buffers (will be moved to device with model)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
         self.tune_projector = tune_projector
@@ -276,8 +316,8 @@ class FlowmatchingActionHead(nn.Module):
                 self.model.eval()
 
     def sample_time(self, batch_size, device, dtype):
-        sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
-        return (self.config.noise_s - sample) / self.config.noise_s
+        """Sample random timesteps uniformly"""
+        return torch.randint(0, self.num_timestep_buckets, (batch_size,), device=device, dtype=torch.long)
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
@@ -324,17 +364,29 @@ class FlowmatchingActionHead(nn.Module):
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
 
-        # Embed noised action trajectory.
+        # === DIFFUSION: Add noise to clean actions ===
         actions = action_input.action
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
-        t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
-        t = t[:, None, None]  # shape (B,1,1) for broadcast
+        
+        # Sample random timesteps
+        t_discretized = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+        
+        # Get noise schedule parameters
+        sqrt_alpha_prod = self.sqrt_alphas_cumprod[t_discretized][:, None, None]
+        sqrt_one_minus_alpha_prod = self.sqrt_one_minus_alphas_cumprod[t_discretized][:, None, None]
+        
+        # Forward diffusion process: x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
+        noisy_trajectory = sqrt_alpha_prod * actions + sqrt_one_minus_alpha_prod * noise
+        
+        # Target depends on prediction type
+        if self.prediction_type == "epsilon":
+            target = noise  # Predict noise
+        elif self.prediction_type == "sample":
+            target = actions  # Predict clean action (x0)
+        else:
+            raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
-        noisy_trajectory = (1 - t) * noise + t * actions
-        velocity = actions - noise
-
-        # Convert (continuous) t -> discrete if needed
-        t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
+        # Embed noisy action trajectory
         action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
 
         # Maybe add position embedding.
@@ -344,10 +396,7 @@ class FlowmatchingActionHead(nn.Module):
             action_features = action_features + pos_embs
 
         # Join vision, language, state and action embedding along sequence dimension.
-        # future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-        # sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
         sa_embs = torch.cat((state_features, action_features), dim=1)
-
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
@@ -356,7 +405,7 @@ class FlowmatchingActionHead(nn.Module):
             encoder_hidden_states=vl_embs,
             encoder_attention_mask=vl_attn_mask,
             timestep=t_discretized,
-            return_all_hidden_states=False,  # NOTE (YL): not using flare now
+            return_all_hidden_states=False,
         )
         
         # Save model output if requested (mean pooled for easier comparison)
@@ -372,7 +421,7 @@ class FlowmatchingActionHead(nn.Module):
 
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
-        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+        loss = F.mse_loss(pred_actions, target, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
         output_dict = {
             "loss": loss,
@@ -401,37 +450,42 @@ class FlowmatchingActionHead(nn.Module):
         ) * self.prior_std  # Apply prior std
 
         num_steps = self.num_inference_timesteps
-        dt = 1.0 / num_steps
+        # num_steps = 10 # for testing
+        
+        # DDPM/DDIM sampling
+        # Create timestep schedule for inference
+        timestep_indices = torch.linspace(self.num_timestep_buckets - 1, 0, num_steps, dtype=torch.long, device=device)
 
-        # Run denoising steps.
-        for t in range(num_steps):
-            t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
-
-            # Embed noised action trajectory.
+        # Run denoising steps (reverse process)
+        print(f"Running {num_steps} denoising steps...", flush=True)
+        for i, t_idx in enumerate(timestep_indices):
+            t_idx = t_idx.item()
+            
+            # Current timestep tensor
             timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
+                size=(batch_size,), fill_value=t_idx, device=device, dtype=torch.long
             )
+            
+            # Embed noised action trajectory
             action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Maybe add position embedding.
+            
+            # Maybe add position embedding
             if self.config.add_pos_embed:
                 pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
                 pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
 
-            # Join vision, language, state and action embedding along sequence dimension.
-            # future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            # sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+            # Join vision, language, state and action embedding along sequence dimension
             sa_embs = torch.cat((state_features, action_features), dim=1)
 
-            # Run model forward.
+            # Run model forward
             model_output = self.model(
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
             )
             
-            # Save model output if requested (mean pooled for easier comparison)
+            # Save model output if requested
             if self.save_model_outputs:
                 if model_output.dim() == 3:  # [B, seq_len, hidden_dim]
                     pooled_model_output = model_output.mean(dim=1)  # [B, hidden_dim]
@@ -440,12 +494,56 @@ class FlowmatchingActionHead(nn.Module):
                     self.saved_model_outputs.append(model_output.detach().cpu())
 
             pred = self.action_decoder(model_output, embodiment_id)
+            pred_noise_or_x0 = pred[:, -self.action_horizon :]
 
-            pred_velocity = pred[:, -self.action_horizon :]
-
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
+            # DDPM update rule
+            alpha_prod_t = self.alphas_cumprod[t_idx]
             
+            # Add small epsilon to prevent division by zero
+            eps = 1e-8
+            
+            if self.prediction_type == "epsilon":
+                # Clamp predicted noise to prevent extreme values
+                pred_noise_or_x0 = torch.clamp(pred_noise_or_x0, -10.0, 10.0)
+                
+                # Predict x0 from noise prediction (with epsilon for numerical stability)
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                
+                pred_x0 = (actions - sqrt_one_minus_alpha_prod_t * pred_noise_or_x0) / sqrt_alpha_prod_t
+            elif self.prediction_type == "sample":
+                # Direct x0 prediction
+                pred_x0 = pred_noise_or_x0
+            else:
+                raise ValueError(f"Unknown prediction type: {self.prediction_type}")
+            
+            # Clamp predicted x0 to action space (critical for stability!)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            
+            # Get next timestep
+            if i < len(timestep_indices) - 1:
+                next_t_idx = timestep_indices[i + 1].item()
+                alpha_prod_t_prev = self.alphas_cumprod[next_t_idx]
+                
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                sqrt_alpha_prod_t_prev = torch.sqrt(alpha_prod_t_prev.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t_prev = torch.sqrt((1 - alpha_prod_t_prev).clamp(min=eps))
+                
+                if self.use_ddim:
+                    # DDIM (deterministic): use predicted direction
+                    epsilon_t = (actions - sqrt_alpha_prod_t * pred_x0) / sqrt_one_minus_alpha_prod_t
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * epsilon_t
+                else:
+                    # DDPM (stochastic): add random noise
+                    noise = torch.randn_like(actions)
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * noise
+                
+                # Clamp actions to prevent explosion
+                actions = torch.clamp(actions, -10.0, 10.0)
+            else:
+                # Final step: return predicted x0
+                actions = pred_x0
         # print(f"actions: {actions}", flush=True)
         return BatchFeature(data={"action_pred": actions})
 
@@ -495,27 +593,29 @@ class FlowmatchingActionHead(nn.Module):
         ) * self.prior_std  # Apply prior std
 
         num_steps = self.num_inference_timesteps
-        dt = 1.0 / num_steps
+        
+        # Create timestep schedule for inference
+        timestep_indices = torch.linspace(self.num_timestep_buckets - 1, 0, num_steps, dtype=torch.long, device=device)
 
-        # Run denoising steps.
-        for t in range(num_steps):
-            t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
-
-            # Embed noised action trajectory.
+        # Run denoising steps (reverse process)
+        for i, t_idx in enumerate(timestep_indices):
+            t_idx = t_idx.item()
+            
+            # Current timestep tensor
             timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
+                size=(batch_size,), fill_value=t_idx, device=device, dtype=torch.long
             )
+            
+            # Embed noised action trajectory
             action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Maybe add position embedding.
+            
+            # Maybe add position embedding
             if self.config.add_pos_embed:
                 pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
                 pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
 
-            # Join vision, language, state and action embedding along sequence dimension.
-            # future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            # sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+            # Join vision, language, state and action embedding along sequence dimension
             sa_embs = torch.cat((state_features, action_features), dim=1)
 
             # Run model forward for conditional
@@ -544,95 +644,120 @@ class FlowmatchingActionHead(nn.Module):
                 # Apply CFG to model outputs (embeddings) before action decoder
                 cfg_model_output = cfg_scale * model_output_cond - (cfg_scale - 1) * model_output_uncond
                 pred = self.action_decoder(cfg_model_output, embodiment_id)
-                pred_velocity = pred[:, -self.action_horizon :]
+                pred_noise_or_x0 = pred[:, -self.action_horizon :]
                 
-                # Save velocity analysis data for embedding mode
+                # Save analysis data for embedding mode
                 if self.save_velocity_analysis:
-                    self.velocity_analysis_data['dt_values'].append(dt)
-                    self.velocity_analysis_data['pred_velocities'].append(pred_velocity.detach().cpu())
+                    self.velocity_analysis_data['pred_noises'].append(pred_noise_or_x0.detach().cpu())
                     
-                    print(f"[CFG-Embedding] Step {t}/{num_steps}: dt={dt:.10f}, pred_velocity_norm={pred_velocity.norm().item():.10f}", flush=True)
+                    print(f"[CFG-Embedding] Step {i}/{num_steps}: pred_noise_norm={pred_noise_or_x0.norm().item():.10f}", flush=True)
                     
-                    # Compute cosine similarity with previous velocity if available
-                    if len(self.velocity_analysis_data['pred_velocities']) > 1:
-                        prev_velocity = self.velocity_analysis_data['pred_velocities'][-2]  # Previous timestep
-                        curr_velocity = self.velocity_analysis_data['pred_velocities'][-1]  # Current timestep (just added)
+                    # Compute cosine similarity with previous noise prediction if available
+                    if len(self.velocity_analysis_data['pred_noises']) > 1:
+                        prev_noise = self.velocity_analysis_data['pred_noises'][-2]
+                        curr_noise = self.velocity_analysis_data['pred_noises'][-1]
                         
-                        # Check if they are the same tensor
-                        diff_norm = (prev_velocity - curr_velocity).norm().item()                        
                         # Compute cosine similarity per timestep and then average
-                        prev_float = prev_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
-                        curr_float = curr_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
+                        prev_float = prev_noise.to(torch.float32)
+                        curr_float = curr_noise.to(torch.float32)
                         
-                        # Cosine similarity per timestep: [B, action_horizon]
                         cos_sim_per_timestep = F.cosine_similarity(prev_float, curr_float, dim=2, eps=1e-8)
-                        print(f"[DEBUG] cos_sim_per_timestep shape: {cos_sim_per_timestep.shape}")
-                        print(f"[DEBUG] cos_sim_per_timestep: {cos_sim_per_timestep}")
-                        
-                        # Average across timesteps and batches
                         cos_sim = cos_sim_per_timestep.mean().item()
                         
-                        self.velocity_analysis_data['velocity_cos_sims'].append(cos_sim)
-                        print(f"[CFG-Embedding] Step {t}/{num_steps}: velocity_cos_sim={cos_sim:.10f}", flush=True)
+                        self.velocity_analysis_data['noise_cos_sims'].append(cos_sim)
+                        print(f"[CFG-Embedding] Step {i}/{num_steps}: noise_cos_sim={cos_sim:.10f}", flush=True)
                 
             elif cfg_mode == "action":
                 # Apply CFG to final actions after action decoder
                 pred_cond = self.action_decoder(model_output_cond, embodiment_id)
                 pred_uncond = self.action_decoder(model_output_uncond, embodiment_id)
                 
-                pred_velocity_cond = pred_cond[:, -self.action_horizon :]
-                pred_velocity_uncond = pred_uncond[:, -self.action_horizon :]
+                pred_noise_or_x0_cond = pred_cond[:, -self.action_horizon :]
+                pred_noise_or_x0_uncond = pred_uncond[:, -self.action_horizon :]
                 
-                # Apply CFG to final actions
-                pred_velocity = cfg_scale * pred_velocity_cond - (cfg_scale - 1) * pred_velocity_uncond
+                # Apply CFG to noise predictions
+                pred_noise_or_x0 = cfg_scale * pred_noise_or_x0_cond - (cfg_scale - 1) * pred_noise_or_x0_uncond
                 
-                # Save velocity analysis data for action mode
+                # Save analysis data for action mode
                 if self.save_velocity_analysis:
-                    self.velocity_analysis_data['dt_values'].append(dt)
-                    self.velocity_analysis_data['pred_velocities'].append(pred_velocity.detach().cpu())
-                    self.velocity_analysis_data['pred_velocities_uncond'].append(pred_velocity_uncond.detach().cpu())
+                    self.velocity_analysis_data['pred_noises'].append(pred_noise_or_x0.detach().cpu())
+                    self.velocity_analysis_data['pred_noises_uncond'].append(pred_noise_or_x0_uncond.detach().cpu())
                     
-                    print(f"[CFG-Action] Step {t}/{num_steps}: dt={dt:.10f}, pred_velocity_norm={pred_velocity.norm().item():.10f}, pred_velocity_uncond_norm={pred_velocity_uncond.norm().item():.10f}", flush=True)
+                    print(f"[CFG-Action] Step {i}/{num_steps}: pred_noise_norm={pred_noise_or_x0.norm().item():.10f}, pred_noise_uncond_norm={pred_noise_or_x0_uncond.norm().item():.10f}", flush=True)
                     
-                    # Compute cosine similarity between conditional and unconditional velocities per timestep
-                    cond_float = pred_velocity_cond.to(torch.float32)  # [B, action_horizon, action_dim]
-                    uncond_float = pred_velocity_uncond.to(torch.float32)  # [B, action_horizon, action_dim]
-
-                    # print("Cond_float : ", cond_float[0][0])
-                    # print("Uncond_float : ", uncond_float[0][0])
+                    # Compute cosine similarity between conditional and unconditional noise predictions
+                    cond_float = pred_noise_or_x0_cond.to(torch.float32)
+                    uncond_float = pred_noise_or_x0_uncond.to(torch.float32)
 
                     cond_uncond_cos_sim_per_timestep = F.cosine_similarity(cond_float, uncond_float, dim=2, eps=1e-8)
                     cond_uncond_cos_sim = cond_uncond_cos_sim_per_timestep.mean().item()
                     self.velocity_analysis_data['cond_uncond_cos_sims'].append(cond_uncond_cos_sim)
-                    print(f"[CFG-Action] Step {t}/{num_steps}: cond_uncond_cos_sim={cond_uncond_cos_sim:.10f}", flush=True)
+                    print(f"[CFG-Action] Step {i}/{num_steps}: cond_uncond_cos_sim={cond_uncond_cos_sim:.10f}", flush=True)
                     
-                    # Compute cosine similarity with previous velocity if available
-                    if len(self.velocity_analysis_data['pred_velocities']) > 1:
-                        prev_velocity = self.velocity_analysis_data['pred_velocities'][-2]  # Previous timestep
-                        curr_velocity = self.velocity_analysis_data['pred_velocities'][-1]  # Current timestep (just added)
-
-                        # print("Prev_velocity : ", prev_velocity)
-                        # print("Curr_velocity : ", curr_velocity)
+                    # Compute cosine similarity with previous noise prediction if available
+                    if len(self.velocity_analysis_data['pred_noises']) > 1:
+                        prev_noise = self.velocity_analysis_data['pred_noises'][-2]
+                        curr_noise = self.velocity_analysis_data['pred_noises'][-1]
                         
-                        # Check if they are the same tensor
-                        diff_norm = (prev_velocity - curr_velocity).norm().item()
-                        # print(f"[DEBUG-Action] Difference norm between prev and curr: {diff_norm:.10f}")
+                        prev_float = prev_noise.to(torch.float32)
+                        curr_float = curr_noise.to(torch.float32)
                         
-                        # Compute cosine similarity per timestep and then average
-                        prev_float = prev_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
-                        curr_float = curr_velocity.to(torch.float32)  # [B, action_horizon, action_dim]
-                        
-                        # Cosine similarity per timestep: [B, action_horizon]
                         cos_sim_per_timestep = F.cosine_similarity(prev_float, curr_float, dim=2, eps=1e-8)
                         cos_sim = cos_sim_per_timestep.mean().item()
-                        self.velocity_analysis_data['velocity_cos_sims'].append(cos_sim)
-                        print(f"[CFG-Action] Step {t}/{num_steps}: velocity_cos_sim={cos_sim:.10f}", flush=True)
+                        self.velocity_analysis_data['noise_cos_sims'].append(cos_sim)
+                        print(f"[CFG-Action] Step {i}/{num_steps}: noise_cos_sim={cos_sim:.10f}", flush=True)
             
             else:
                 raise ValueError(f"Invalid cfg_mode: {cfg_mode}. Must be 'action', 'embedding', or None")
 
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
+            # DDPM update rule
+            alpha_prod_t = self.alphas_cumprod[t_idx]
+            
+            # Add small epsilon to prevent division by zero
+            eps = 1e-8
+            
+            if self.prediction_type == "epsilon":
+                # Clamp predicted noise to prevent extreme values
+                pred_noise_or_x0 = torch.clamp(pred_noise_or_x0, -10.0, 10.0)
+                
+                # Predict x0 from noise prediction (with epsilon for numerical stability)
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                
+                pred_x0 = (actions - sqrt_one_minus_alpha_prod_t * pred_noise_or_x0) / sqrt_alpha_prod_t
+            elif self.prediction_type == "sample":
+                # Direct x0 prediction
+                pred_x0 = pred_noise_or_x0
+            else:
+                raise ValueError(f"Unknown prediction type: {self.prediction_type}")
+            
+            # Clamp predicted x0 to action space (critical for stability!)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            
+            # Get next timestep
+            if i < len(timestep_indices) - 1:
+                next_t_idx = timestep_indices[i + 1].item()
+                alpha_prod_t_prev = self.alphas_cumprod[next_t_idx]
+                
+                sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t = torch.sqrt((1 - alpha_prod_t).clamp(min=eps))
+                sqrt_alpha_prod_t_prev = torch.sqrt(alpha_prod_t_prev.clamp(min=eps))
+                sqrt_one_minus_alpha_prod_t_prev = torch.sqrt((1 - alpha_prod_t_prev).clamp(min=eps))
+                
+                if self.use_ddim:
+                    # DDIM (deterministic): use predicted direction
+                    epsilon_t = (actions - sqrt_alpha_prod_t * pred_x0) / sqrt_one_minus_alpha_prod_t
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * epsilon_t
+                else:
+                    # DDPM (stochastic): add random noise
+                    noise = torch.randn_like(actions)
+                    actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * noise
+                
+                # Clamp actions to prevent explosion
+                actions = torch.clamp(actions, -10.0, 10.0)
+            else:
+                # Final step: return predicted x0
+                actions = pred_x0
             
         return BatchFeature(data={"action_pred": actions})
 
@@ -650,9 +775,9 @@ class FlowmatchingActionHead(nn.Module):
         """Clear all velocity analysis data."""
         self.velocity_analysis_data = {
             'dt_values': [],
-            'pred_velocities': [],
-            'pred_velocities_uncond': [],
-            'velocity_cos_sims': [],
+            'pred_noises': [],
+            'pred_noises_uncond': [],
+            'noise_cos_sims': [],
             'cond_uncond_cos_sims': []
         }
     
@@ -675,3 +800,4 @@ class FlowmatchingActionHead(nn.Module):
     @property
     def dtype(self):
         return next(iter(self.parameters())).dtype
+

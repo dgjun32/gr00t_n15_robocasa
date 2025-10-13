@@ -64,7 +64,7 @@ conda install --force-reinstall certifi
 pip install --upgrade protobuf
 ```
 
-### 5. Example Evaluation Command
+### 5. Example Robocasa Evaluation Command
 
 After installation, you can run robocasa evaluation with the following example command:
 
@@ -81,6 +81,208 @@ CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
     --max_episode_steps 1000 \
     2>&1 | tee ./logs_inference_0810_visual_30k/PnPCabToCounter$(date +%Y%m%d_%H%M%S).log
 ```
+
+### 6. Training with Different Action Heads
+
+GR00T supports different action head types for training. You can choose between diffusion and regression action heads depending on your task requirements.
+
+For implementation details, refer to:
+- `gr00t/model/action_head/diffusion_action_head.py`
+- `gr00t/model/action_head/regression_action_head.py`
+
+#### Diffusion Action Head Training
+
+```sh
+CUDA_VISIBLE_DEVICES=1 python scripts/gr00t_finetune.py \
+    --dataset-path /data/home_backup_sj/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CoffeeServeMug \
+    --num-gpus 1 \
+    --output-dir /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_diffusion \
+    --max-steps 20000 \
+    --data-config single_panda_gripper \
+    --batch-size 32 \
+    --save-steps 1000 \
+    --action_head_type diffusion \
+    --learning-rate 1e-4 \
+    --weight-decay 1e-6 \
+    --warmup-ratio 0.02 \
+    2>&1 | tee ./training_logs/training_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Regression Action Head Training
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python scripts/gr00t_finetune.py \
+    --dataset-path /data/home_backup_sj/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CoffeeServeMug \
+    --num-gpus 1 \
+    --output-dir /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_regression \
+    --max-steps 20000 \
+    --data-config single_panda_gripper \
+    --batch-size 32 \
+    --save-steps 1000 \
+    --action_head_type regression \
+    2>&1 | tee ./training_logs/training_$(date +%Y%m%d_%H%M%S).log
+```
+
+### 7. Inference with Different Action Heads
+
+After training with different action heads, you can run inference using various denoising configurations.
+
+**Note**: You can also evaluate your trained models on a validation dataset using `scripts/eval_policy_on_dataset.py`. This allows you to compare predicted actions against ground truth and compute metrics such as MSE. See `scripts/run_eval_on_dataset.sh` for batch evaluation examples.
+
+#### Flow Matching Inference (Default)
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_original/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_flow_matching \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    2>&1 | tee ./logs/flow_matching_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Diffusion Inference with DDPM
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_diffusion/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_ddpm \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    --diffusion_mode ddpm \
+    --denoising_steps 100 \
+    2>&1 | tee ./logs/diffusion_ddpm_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Diffusion Inference with DDIM
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_diffusion/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_ddim \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    --diffusion_mode ddim \
+    --denoising_steps 16 \
+    2>&1 | tee ./logs/diffusion_ddim_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Regression Inference
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_regression/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_regression \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    2>&1 | tee ./logs/regression_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Advanced: Inference with Prior Variance Control
+
+You can control the prior variance during inference to adjust the exploration-exploitation trade-off:
+
+```sh
+# Flow matching with prior variance
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_original/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_prior_variance_0.5 \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    --prior_variance 0.5 \
+    2>&1 | tee ./logs/prior_variance_0.5_$(date +%Y%m%d_%H%M%S).log
+
+# Flow matching with step-specific prior variance
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_robocasa_cfg.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_original/checkpoint-20000 \
+    --action_horizon 16 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name CoffeeServeMug \
+    --num_episodes 50 \
+    --video_path /home/sinjae/Isaac-GR00T-robocasa/eval_video/CoffeeServeMug_steps_60_160 \
+    --max_episode_steps 1000 \
+    --cfg_mode none \
+    --prior_variance 0.0 \
+    --prior_variance_steps 60 160 \
+    2>&1 | tee ./logs/steps_60_160_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### Offline Evaluation on Validation Dataset
+
+You can evaluate your trained models on a validation dataset to compare predicted actions with ground truth:
+
+```sh
+# Flow Matching evaluation on dataset
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_on_dataset.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_original/checkpoint-20000 \
+    --dataset_path /data/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CoffeeServeMug \
+    --traj_id -1 \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --action_horizon 16 \
+    --video_backend decord \
+    --cfg_mode none \
+    --output_dir eval_results_dataset/flow_matching
+
+# Diffusion DDIM evaluation on dataset
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_on_dataset.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_diffusion/checkpoint-20000 \
+    --dataset_path /data/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CoffeeServeMug \
+    --traj_id -1 \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --action_horizon 16 \
+    --video_backend decord \
+    --cfg_mode none \
+    --diffusion_mode ddim \
+    --denoising_steps 16 \
+    --output_dir eval_results_dataset/diffusion_ddim_16
+
+# Regression evaluation on dataset
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_on_dataset.py \
+    --model_path /home/sinjae/Isaac-GR00T-robocasa/gr00t_ckpt/1011/CoffeeServeMug_regression/checkpoint-20000 \
+    --dataset_path /data/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CoffeeServeMug \
+    --traj_id -1 \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --action_horizon 16 \
+    --video_backend decord \
+    --cfg_mode none \
+    --output_dir eval_results_dataset/regression
+```
+
+The evaluation results will be saved in the specified output directory, including action comparison plots and MSE metrics.
 
 ---
 

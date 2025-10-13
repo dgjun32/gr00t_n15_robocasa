@@ -240,10 +240,11 @@ if __name__ == "__main__":
     # main evaluation loop
     stats = defaultdict(list)
     for i in trange(args.num_episodes):
+
+        obs, info = env.reset()
         pbar = tqdm(
             total=args.max_episode_steps, desc=f"Episode {i + 1} / {env.unwrapped.get_ep_meta()['lang']}", leave=False
         )
-        obs, info = env.reset()
         done = False
         step = 0
         while not done:

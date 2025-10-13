@@ -110,6 +110,10 @@ class GR00TTransform(InvertibleModalityTransform):
         default=0.0,
         description="Dropout probability for language.",
     )
+    image_dropout_prob: float = Field(
+        default=0.0,
+        description="Dropout probability for image (unconditional).",
+    )
 
     # Private attributes to keep track of shapes/dimensions across apply/unapply
     _language_key: Optional[list[str]] = PrivateAttr(default=None)
@@ -213,26 +217,28 @@ class GR00TTransform(InvertibleModalityTransform):
         inputs["eagle_content"] = eagle_content
         return inputs
 
-    def _prepare_video(self, data: dict):
+    def _prepare_video(self, data: dict, force_dropout: bool = False):
         """Process, stack, and pad images from data['video']."""
         ## TODO(YL, FH): check if this is correct
         images = rearrange(
             data["video"],
             "t v h w c -> v t c h w",
         )
+        # Image dropout: replace with zeros (unconditional)
+        if force_dropout:
+            images = np.zeros_like(images)
         return images
 
-    def _prepare_language(self, data: dict):
+    def _prepare_language(self, data: dict, force_dropout: bool = False):
         """Tokenize data['language'] (or default_instruction if missing)."""
         if self._language_key is not None:
             raw_language = data[self._language_key]
             if isinstance(raw_language, list):
                 raw_language = raw_language[0]
 
-            # Language dropout
-            if self.training and self.language_dropout_prob > 1e-9:
-                if random.random() < self.language_dropout_prob:
-                    raw_language = self.default_instruction
+            # Language dropout (applied if force_dropout is True)
+            if force_dropout:
+                raw_language = self.default_instruction
         else:
             raw_language = self.default_instruction
         return raw_language
@@ -301,10 +307,24 @@ class GR00TTransform(InvertibleModalityTransform):
     def apply_single(self, data: dict) -> dict:
         transformed_data = {}
 
+        # Decide dropout strategy: language XOR image (mutually exclusive)
+        apply_language_dropout = False
+        apply_image_dropout = False
+        if self.training:
+            total_dropout_prob = self.language_dropout_prob + self.image_dropout_prob
+            if total_dropout_prob > 1e-9:
+                rand_val = random.random()
+                if rand_val < self.language_dropout_prob:
+                    apply_language_dropout = True
+                    print("Language dropout applied", flush=True)
+                elif rand_val < total_dropout_prob:
+                    apply_image_dropout = True
+                    print("Image dropout applied", flush=True)
+
         # 1) Prepare video and language with vlm processing.
-        images = self._prepare_video(data)
+        images = self._prepare_video(data, force_dropout=apply_image_dropout)
         images = images.astype(np.uint8)
-        language = self._prepare_language(data)
+        language = self._prepare_language(data, force_dropout=apply_language_dropout)
         batch_data = {"images": images, "language": language}
         vlm_outputs = self._apply_vlm_processing(batch_data)
 

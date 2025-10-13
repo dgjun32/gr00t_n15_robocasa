@@ -64,6 +64,9 @@ class ArgsConfig:
     base_model_path: str = "nvidia/GR00T-N1.5-3B"
     """Path or HuggingFace model ID for the base model."""
 
+    action_head_type: Literal["flowmatching", "diffusion", "regression"] = "flowmatching"
+    """Type of action head to use: 'flowmatching', 'diffusion', or 'regression'."""
+
     tune_llm: bool = False
     """Whether to fine-tune the language model backbone."""
 
@@ -128,6 +131,9 @@ class ArgsConfig:
     language_dropout_prob: float = 0.0
     """Probability of dropping language instruction to empty string during training."""
 
+    image_dropout_prob: float = 0.0
+    """Probability of dropping image input to zeros (unconditional) during training."""
+
 
 #####################################################################################
 # main training function
@@ -144,11 +150,14 @@ def main(config: ArgsConfig):
     modality_configs = data_config_cls.modality_config()
     transforms = data_config_cls.transform()
     
-    # Set language dropout probability on GR00TTransform
+    # Set language and image dropout probability on GR00TTransform
     for transform in transforms.transforms:
         if hasattr(transform, 'language_dropout_prob'):
             transform.language_dropout_prob = config.language_dropout_prob
             print(f"Set language_dropout_prob to {config.language_dropout_prob}")
+        if hasattr(transform, 'image_dropout_prob'):
+            transform.image_dropout_prob = config.image_dropout_prob
+            print(f"Set image_dropout_prob to {config.image_dropout_prob}")
 
     # 1.2 data loader: we will use either single dataset or mixture dataset
     if len(config.dataset_path) == 1:
@@ -194,7 +203,7 @@ def main(config: ArgsConfig):
     # First, get the data config to determine action horizon
     data_action_horizon = len(data_config_cls.action_indices)
 
-    # Load model
+    # Load model with action_head_type
     model = GR00T_N1_5.from_pretrained(
         pretrained_model_name_or_path=config.base_model_path,
         tune_llm=config.tune_llm,  # backbone's LLM
@@ -202,41 +211,119 @@ def main(config: ArgsConfig):
         tune_projector=config.tune_projector,  # action head's projector
         tune_diffusion_model=config.tune_diffusion_model,  # action head's DiT
     )
-
-    # Update action_horizon to match data config
-    # Need to recreate action head with correct config since it was initialized with old config
-    if data_action_horizon != model.action_head.config.action_horizon:
-        print(
-            f"Recreating action head with action_horizon {data_action_horizon} (was {model.action_head.config.action_horizon})"
-        )
-
-        # Update the action head config
-        new_action_head_config = model.action_head.config
-        new_action_head_config.action_horizon = data_action_horizon
-
-        # Import the FlowmatchingActionHead class
-        from gr00t.model.action_head.flow_matching_action_head import (
-            FlowmatchingActionHead,
-        )
-
-        # Create new action head with updated config
-        new_action_head = FlowmatchingActionHead(new_action_head_config)
-
-        # Copy the weights from the old action head to the new one
+    
+    # Check current action head configuration
+    current_action_head_type = getattr(model.config, 'action_head_type', 'flowmatching')
+    current_action_horizon = model.action_head.config.action_horizon
+    
+    # Determine what needs to be changed
+    need_change_type = (config.action_head_type != current_action_head_type)
+    need_change_horizon = (data_action_horizon != current_action_horizon)
+    
+    # Handle action_head_type change
+    if need_change_type:
+        print(f"Changing action_head_type from {current_action_head_type} to {config.action_head_type}")
+        
+        # Get the old config as a dictionary
+        old_config_dict = model.action_head.config.to_dict()
+        
+        # Import the appropriate action head class and config
+        if config.action_head_type == "flowmatching":
+            from gr00t.model.action_head.flow_matching_action_head import (
+                FlowmatchingActionHead,
+                FlowmatchingActionHeadConfig,
+            )
+            # Create new config from old config dict
+            new_action_head_config = FlowmatchingActionHeadConfig(**old_config_dict)
+            new_action_head = FlowmatchingActionHead(new_action_head_config)
+            
+        elif config.action_head_type == "diffusion":
+            from gr00t.model.action_head.diffusion_action_head import (
+                DiffusionActionHead,
+                DiffusionActionHeadConfig,
+            )
+            # Create new config from old config dict, DiffusionActionHeadConfig will use defaults for missing keys
+            new_action_head_config = DiffusionActionHeadConfig(**old_config_dict)
+            new_action_head = DiffusionActionHead(new_action_head_config)
+            
+        elif config.action_head_type == "regression":
+            from gr00t.model.action_head.regression_action_head import (
+                RegressionActionHead,
+                RegressionActionHeadConfig,
+            )
+            # Create new config from old config dict
+            new_action_head_config = RegressionActionHeadConfig(**old_config_dict)
+            new_action_head = RegressionActionHead(new_action_head_config)
+        else:
+            raise ValueError(f"Unknown action_head_type: {config.action_head_type}")
+        
+        # Copy weights from old action head (strict=False to allow architecture differences)
         new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
-
+        
         # Replace the action head
         model.action_head = new_action_head
-
-        # Update model config AND the action_head_cfg dictionary that gets saved
-        model.config.action_horizon = data_action_horizon
-        model.action_horizon = data_action_horizon
-        model.config.action_head_cfg["action_horizon"] = data_action_horizon
-
+        model.config.action_head_type = config.action_head_type
+        
         # Set trainable parameters for the new action head
         model.action_head.set_trainable_parameters(
             tune_projector=config.tune_projector, tune_diffusion_model=config.tune_diffusion_model
         )
+        print(f"Successfully changed action_head_type to {config.action_head_type}")
+    
+    # Handle action_horizon change
+    if need_change_horizon:
+        print(f"Changing action_horizon from {current_action_horizon} to {data_action_horizon}")
+        
+        # Get the current config as a dictionary and update action_horizon
+        config_dict = model.action_head.config.to_dict()
+        config_dict["action_horizon"] = data_action_horizon
+        
+        # Import the appropriate action head class based on current action_head_type
+        current_type = getattr(model.config, 'action_head_type', 'flowmatching')
+        if current_type == "flowmatching":
+            from gr00t.model.action_head.flow_matching_action_head import (
+                FlowmatchingActionHead,
+                FlowmatchingActionHeadConfig,
+            )
+            new_action_head_config = FlowmatchingActionHeadConfig(**config_dict)
+            new_action_head = FlowmatchingActionHead(new_action_head_config)
+        elif current_type == "diffusion":
+            from gr00t.model.action_head.diffusion_action_head import (
+                DiffusionActionHead,
+                DiffusionActionHeadConfig,
+            )
+            new_action_head_config = DiffusionActionHeadConfig(**config_dict)
+            new_action_head = DiffusionActionHead(new_action_head_config)
+        elif current_type == "regression":
+            from gr00t.model.action_head.regression_action_head import (
+                RegressionActionHead,
+                RegressionActionHeadConfig,
+            )
+            new_action_head_config = RegressionActionHeadConfig(**config_dict)
+            new_action_head = RegressionActionHead(new_action_head_config)
+        else:
+            raise ValueError(f"Unknown action_head_type: {current_type}")
+        
+        # Copy weights from old action head
+        new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
+        
+        # Replace the action head
+        model.action_head = new_action_head
+        
+        # Update model config AND the action_head_cfg dictionary that gets saved
+        model.config.action_horizon = data_action_horizon
+        model.action_horizon = data_action_horizon
+        model.config.action_head_cfg["action_horizon"] = data_action_horizon
+        
+        # Set trainable parameters for the new action head
+        model.action_head.set_trainable_parameters(
+            tune_projector=config.tune_projector, tune_diffusion_model=config.tune_diffusion_model
+        )
+        print(f"Successfully changed action_horizon to {data_action_horizon}")
+    
+    # If nothing changed, just print info
+    if not need_change_type and not need_change_horizon:
+        print(f"Using existing action head: type={current_action_head_type}, action_horizon={current_action_horizon}")
 
     # Set the model's compute_dtype to bfloat16
     model.compute_dtype = "bfloat16"

@@ -62,36 +62,6 @@ def flatten(d, parent_key="", sep="."):
     return dict(items)
 
 
-def apply_cfg_to_actions(action_with_text, action_without_text, cfg_scale=2.0):
-    """
-    Apply Conditional Free Guidance to actions.
-    Formula: action_cfg = cfg_scale * action_with_text - action_without_text
-    Only applies CFG to end effector position and rotation, keeps other actions unchanged.
-    
-    Args:
-        action_with_text: Action output when using original text instruction
-        action_without_text: Action output when using empty text instruction
-        cfg_scale: Scale factor for CFG (default: 2.0)
-    
-    Returns:
-        CFG-guided action
-    """
-    cfg_action = {}
-    
-    # Keys that should have CFG applied
-    cfg_keys = ["action.end_effector_position", "action.end_effector_rotation"]
-    
-    for key in action_with_text.keys():
-        if key in cfg_keys and key in action_without_text:
-            # Apply CFG timestep-wise for end effector actions
-            cfg_action[key] = cfg_scale * action_with_text[key] - (cfg_scale - 1) * action_without_text[key]
-        else:
-            # For other actions (gripper, base_motion, control_mode), use conditional output as is
-            cfg_action[key] = action_with_text[key]
-    
-    return cfg_action
-
-
 def modify_obs_for_empty_instruction(obs):
     """
     Modify observation to have empty text instruction for unconditional generation.
@@ -106,159 +76,11 @@ def modify_obs_for_empty_instruction(obs):
     
     # Specific language key for task description
     task_description_key = "annotation.human.action.task_description"
-    if task_description_key in obs_empty:
-        if isinstance(obs_empty[task_description_key], str):
-            obs_empty[task_description_key] = ""
-        elif isinstance(obs_empty[task_description_key], np.ndarray) and obs_empty[task_description_key].dtype.kind in ['U', 'S']:
-            # String array
-            obs_empty[task_description_key] = np.array([""] * len(obs_empty[task_description_key]), dtype=obs_empty[task_description_key].dtype)
-    
-    # Find and replace other text instruction fields as fallback
-    for key in obs_empty.keys():
-        if 'instruction' in key.lower() or 'text' in key.lower() or 'lang' in key.lower():
-            if isinstance(obs_empty[key], str):
-                obs_empty[key] = ""
-            elif isinstance(obs_empty[key], np.ndarray) and obs_empty[key].dtype.kind in ['U', 'S']:
-                # String array
-                obs_empty[key] = np.array([""] * len(obs_empty[key]), dtype=obs_empty[key].dtype)
-    
+    empty_string = ""
+    obs_empty[task_description_key] = [empty_string]
+    print(f"Obs_empty[task_description_key] : {obs_empty[task_description_key]}")
     return obs_empty
 
-
-def gather_demonstrations_as_hdf5(directory, out_dir, env_info, excluded_episodes=None):
-    """
-    Gathers the demonstrations saved in @directory into a
-    single hdf5 file.
-    The strucure of the hdf5 file is as follows.
-    data (group)
-        date (attribute) - date of collection
-        time (attribute) - time of collection
-        repository_version (attribute) - repository version used during collection
-        env (attribute) - environment name on which demos were collected
-        demo1 (group) - every demonstration has a group
-            model_file (attribute) - model xml string for demonstration
-            states (dataset) - flattened mujoco states
-            actions (dataset) - actions applied during demonstration
-        demo2 (group)
-        ...
-    Args:
-        directory (str): Path to the directory containing raw demonstrations.
-        out_dir (str): Path to where to store the hdf5 file.
-        env_info (str): JSON-encoded string containing environment information,
-            including controller and robot info
-    """
-
-    hdf5_path = os.path.join(out_dir, "demo.hdf5")
-    print("Saving hdf5 to", hdf5_path)
-    f = h5py.File(hdf5_path, "w")
-
-    # store some metadata in the attributes of one group
-    grp = f.create_group("data")
-
-    num_eps = 0
-    env_name = None  # will get populated at some point
-
-    for ep_directory in os.listdir(directory):
-        # print("Processing {} ...".format(ep_directory))
-        if (excluded_episodes is not None) and (ep_directory in excluded_episodes):
-            # print("\tExcluding this episode!")
-            continue
-
-        state_paths = os.path.join(directory, ep_directory, "state_*.npz")
-        states = []
-        actions = []
-        actions_abs = []
-        rewards = []
-        # success = False
-
-        for state_file in sorted(glob(state_paths)):
-            dic = np.load(state_file, allow_pickle=True)
-            env_name = str(dic["env"])
-
-            states.extend(dic["states"])
-            rewards.extend(dic["rewards"])
-            for ai in dic["action_infos"]:
-                actions.append(ai["actions"])
-                if "actions_abs" in ai:
-                    actions_abs.append(ai["actions_abs"])
-            # success = success or dic["successful"]
-
-        if len(states) == 0:
-            continue
-
-        # # Add only the successful demonstration to dataset
-        # if success:
-
-        # print("Demonstration is successful and has been saved")
-        # Delete the last state. This is because when the DataCollector wrapper
-        # recorded the states and actions, the states were recorded AFTER playing that action,
-        # so we end up with an extra state at the end.
-        del states[-1]
-        assert len(states) == len(actions)
-
-        num_eps += 1
-        ep_data_grp = grp.create_group("demo_{}".format(num_eps))
-
-        # store model xml as an attribute
-        xml_path = os.path.join(directory, ep_directory, "model.xml")
-        with open(xml_path, "r") as f:
-            xml_str = f.read()
-        ep_data_grp.attrs["model_file"] = xml_str
-
-        # store ep meta as an attribute
-        ep_meta_path = os.path.join(directory, ep_directory, "ep_meta.json")
-        if os.path.exists(ep_meta_path):
-            with open(ep_meta_path, "r") as f:
-                ep_meta = f.read()
-            ep_data_grp.attrs["ep_meta"] = ep_meta
-
-        # write datasets for states and actions
-        ep_data_grp.create_dataset("states", data=np.array(states))
-        ep_data_grp.create_dataset("actions", data=np.array(actions))
-        ep_data_grp.create_dataset("rewards", data=np.array(rewards))
-        if len(actions_abs) > 0:
-            print(np.array(actions_abs).shape)
-            ep_data_grp.create_dataset("actions_abs", data=np.array(actions_abs))
-
-        # else:
-        #     pass
-        #     # print("Demonstration is unsuccessful and has NOT been saved")
-
-    print("{} successful demos so far".format(num_eps))
-
-    if num_eps == 0:
-        f.close()
-        return
-
-    # write dataset attributes (metadata)
-    now = datetime.datetime.now()
-    grp.attrs["date"] = "{}-{}-{}".format(now.month, now.day, now.year)
-    grp.attrs["time"] = "{}:{}:{}".format(now.hour, now.minute, now.second)
-    grp.attrs["robocasa_version"] = robocasa.__version__
-    grp.attrs["robosuite_version"] = robosuite.__version__
-    grp.attrs["mujoco_version"] = mujoco.__version__
-    grp.attrs["env"] = env_name
-    grp.attrs["env_info"] = env_info
-
-    f.close()
-
-    return hdf5_path
-
-
-"""
-Example command:
-
-python scripts/eval_policy_robocasa_cfg_actionhead.py --host localhost --port 5555
-    --action_horizon 16
-    --video_backend decord
-    --dataset_path demo_data/robot_sim.PickNPlace/
-    --embodiment_tag gr1
-    --data_config gr1_arms_waist
-    --env_name CloseDrawer
-    --num_episodes 10
-    --cfg_scale 2.0
-provide --model_path to load up the model checkpoint in this script.
-"""
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -293,13 +115,41 @@ if __name__ == "__main__":
         help="Number of denoising steps if model_path is provided",
         default=4,
     )
+    parser.add_argument(
+        "--diffusion_mode",
+        type=str,
+        choices=["ddim", "ddpm"],
+        default="ddim",
+        help="Diffusion sampling mode: 'ddim' (deterministic) or 'ddpm' (stochastic). Only for diffusion action head.",
+    )
+    parser.add_argument(
+        "--prior_variance",
+        type=float,
+        default=1.0,
+        help="Variance of the prior distribution for initial actions. Default=1.0 (standard normal). Set to 0.0 for deterministic zero initialization.",
+    )
+    parser.add_argument(
+        "--prior_variance_steps",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("START", "END"),
+        help="Step range [START, END) to apply prior_variance. If not specified, applies to all steps. Example: --prior_variance_steps 0 50 applies prior_variance only for steps 0-49.",
+    )
     
     # CFG specific parameters
     parser.add_argument(
         "--cfg_scale",
         type=float,
-        default=10.0,
+        default=5.0,
         help="Scale factor for Conditional Free Guidance. Higher values increase instruction following strength.",
+    )
+    parser.add_argument(
+        "--cfg_mode",
+        type=str,
+        choices=["action", "embedding", "none"],
+        default="embedding",
+        help="CFG mode: 'action' for final action CFG, 'embedding' for model output CFG, 'none' for no CFG",
     )
 
     # robocasa env and evaluation parameters
@@ -386,6 +236,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Convert cfg_mode to None if "none"
+    cfg_mode = None if args.cfg_mode == "none" else args.cfg_mode
+
     data_config = DATA_CONFIG_MAP[args.data_config]
     if args.model_path is not None:
         import torch
@@ -393,16 +246,61 @@ if __name__ == "__main__":
         modality_config = data_config.modality_config()
         modality_transform = data_config.transform()
 
-        policy: BasePolicy = Gr00tPolicy(
+        # Load base policy (standard normal prior)
+        base_policy: BasePolicy = Gr00tPolicy(
             model_path=args.model_path,
             modality_config=modality_config,
             modality_transform=modality_transform,
             embodiment_tag=args.embodiment_tag,
             denoising_steps=args.denoising_steps,
+            diffusion_mode=args.diffusion_mode,
+            prior_variance=1.0,  # Always standard normal for base policy
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
+        
+        # Load prior policy if prior_variance_steps is specified and prior_variance != 1.0
+        if args.prior_variance_steps is not None and args.prior_variance != 1.0:
+            print(f"Loading prior policy with variance {args.prior_variance} for steps [{args.prior_variance_steps[0]}, {args.prior_variance_steps[1]})")
+            prior_policy: BasePolicy = Gr00tPolicy(
+                model_path=args.model_path,
+                modality_config=modality_config,
+                modality_transform=modality_transform,
+                embodiment_tag=args.embodiment_tag,
+                denoising_steps=args.denoising_steps,
+                diffusion_mode=args.diffusion_mode,
+                prior_variance=args.prior_variance,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
+            use_dual_policy = True
+            prior_start_step = args.prior_variance_steps[0]
+            prior_end_step = args.prior_variance_steps[1]
+        else:
+            # If no step range or prior_variance == 1.0, just use one policy
+            if args.prior_variance != 1.0:
+                # Override base_policy with prior_variance
+                base_policy = Gr00tPolicy(
+                    model_path=args.model_path,
+                    modality_config=modality_config,
+                    modality_transform=modality_transform,
+                    embodiment_tag=args.embodiment_tag,
+                    denoising_steps=args.denoising_steps,
+                    diffusion_mode=args.diffusion_mode,
+                    prior_variance=args.prior_variance,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                )
+            prior_policy = None
+            use_dual_policy = False
+            prior_start_step = None
+            prior_end_step = None
+        
+        # Set the primary policy reference
+        policy = base_policy
     else:
         policy: BasePolicy = RobotInferenceClient(host=args.host, port=args.port)
+        use_dual_policy = False
+        prior_policy = None
+        prior_start_step = None
+        prior_end_step = None
 
     all_gt_actions = []
     all_pred_actions = []
@@ -410,48 +308,6 @@ if __name__ == "__main__":
     # Get the supported modalities for the policy
     modality = policy.get_modality_config()
     print(modality)
-
-    # load robocasa env
-    controller_config = load_composite_controller_config(
-        controller=args.controller,
-        robot=args.robots if isinstance(args.robots, str) else args.robots[0],
-    )
-
-    env_name = args.env_name
-    # Create argument configuration
-    config = {
-        "env_name": env_name,
-        "robots": args.robots,
-        "controller_configs": controller_config,
-        "generative_textures": "100p",
-    }
-
-    # Check if we're using a multi-armed environment and use env_configuration argument if so
-    if "TwoArm" in env_name:
-        config["env_configuration"] = args.config
-
-    # Mirror actions if using a kitchen environment
-    if env_name in ["Lift"]:  # add other non-kitchen tasks here
-        if args.obj_groups is not None:
-            print(
-                "Specifying 'obj_groups' in non-kitchen environment does not have an effect."
-            )
-    else:
-        # store paired eval setup in meta config for record-keeping
-        config["layout_and_style_ids"] = args.layout_and_style_ids
-        ### update config for kitchen envs ###
-        if args.obj_groups is not None:
-            config.update({"obj_groups": args.obj_groups})
-
-        config["translucent_robot"] = True
-
-        # by default use obj instance split A
-        config["obj_instance_split"] = "A"
-        # config["obj_instance_split"] = None
-        # config["obj_registries"] = ("aigen",)
-
-    # Grab reference to controller config and convert it to json-encoded string
-    env_info = json.dumps(config)
 
     # Parse flattened layout_and_style_ids into list of (layout, style) pairs
     flat_ls = args.layout_and_style_ids
@@ -461,7 +317,6 @@ if __name__ == "__main__":
     env = load_robocasa_gym_env(
         args.env_name,
         seed=args.seed,
-        directory=Path(args.data_collection_path),
         generative_textures="100p" if args.generative_textures else None,
         layout_and_style_ids=layout_and_style_pairs,
         layout_ids=None,
@@ -496,10 +351,10 @@ if __name__ == "__main__":
     # main evaluation loop
     stats = defaultdict(list)
     for i in trange(args.num_episodes):
+        obs, info = env.reset()
         pbar = tqdm(
             total=args.max_episode_steps, desc=f"Episode {i + 1} / {env.unwrapped.get_ep_meta()['lang']}", leave=False
         )
-        obs, info = env.reset()
         done = False
         step = 0
         while not done:
@@ -513,38 +368,51 @@ if __name__ == "__main__":
                     max=(np.nanmax(x) if isinstance(x, np.ndarray) and x.size and np.issubdtype(x.dtype, np.number) else None),
                 )
 
-            # print("=== OBS SUMMARY ===")
-            # for k, v in obs.items():
-            #     print(k, summarize_np(v))
             
-            # Get action with original instruction (conditional)
-            action_with_text = policy.get_action(obs)
-            print("Action with text instruction:", action_with_text)
+            # Select policy based on step and prior_variance_steps
+            if use_dual_policy and prior_start_step <= step < prior_end_step:
+                # Use prior policy (with custom prior_variance)
+                current_policy = prior_policy
+            else:
+                # Use base policy (standard normal)
+                current_policy = base_policy
             
-            # Get action with empty instruction (unconditional)
-            obs_empty = modify_obs_for_empty_instruction(obs)
-            action_without_text = policy.get_action(obs_empty)
-            print("Action without text instruction:", action_without_text)
-            
-            # Apply Conditional Free Guidance
-            cfg_action = apply_cfg_to_actions(action_with_text, action_without_text, args.cfg_scale)
-            print("CFG guided action:", cfg_action)
+            if cfg_mode is None:
+                # No CFG, use regular get_action
+                action = current_policy.get_action(obs)
+                # print("Action (no CFG):", action)
+            else:
+                # CFG mode, prepare unconditional observation and use get_action_cfg
+                obs_empty = modify_obs_for_empty_instruction(obs)
+                action = current_policy.get_action_cfg(obs, obs_empty, cfg_mode, args.cfg_scale)
+                # print(f"Action (CFG {cfg_mode} mode, scale {args.cfg_scale}):", action)
 
-            post_action = postprocess_action(cfg_action)
+            post_action = postprocess_action(action)
             next_obs, reward, terminated, truncated, info = env.step(post_action)
             done = terminated or truncated
             step += args.action_horizon
             obs = next_obs
             pbar.update(args.action_horizon)
         add_to(stats, flatten({"is_success": info["is_success"]}))
-        print(f"Result: {i}, {info['is_success']}")
+        
+        # Calculate cumulative success rate
+        total_episodes = i + 1
+        total_successes = int(sum(stats["is_success"]))
+        success_rate = total_successes / total_episodes
+        is_success_val = bool(info["is_success"])
+        
+        print(f"Result: {i}, {is_success_val} ({total_successes}/{total_episodes} = {success_rate:.3f})")
         pbar.close()
 
     env.close()
 
     for k, v in stats.items():
         stats[k] = np.mean(v)
-    print(f"Final statistics with CFG scale {args.cfg_scale}:")
+    
+    if cfg_mode is None:
+        print("Final statistics (no CFG):")
+    else:
+        print(f"Final statistics with CFG {cfg_mode} mode, scale {args.cfg_scale}:")
     print(stats)
 
     exit() 

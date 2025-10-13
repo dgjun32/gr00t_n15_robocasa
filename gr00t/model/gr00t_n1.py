@@ -28,6 +28,14 @@ from .action_head.flow_matching_action_head import (
     FlowmatchingActionHead,
     FlowmatchingActionHeadConfig,
 )
+from .action_head.diffusion_action_head import (
+    DiffusionActionHead,
+    DiffusionActionHeadConfig,
+)
+from .action_head.regression_action_head import (
+    RegressionActionHead,
+    RegressionActionHeadConfig,
+)
 from .backbone import EagleBackbone
 
 BACKBONE_FEATURE_KEY = "backbone_features"
@@ -49,6 +57,7 @@ class GR00T_N1_5_Config(PretrainedConfig):
 
     action_dim: int = field(init=False, metadata={"help": "Action dimension."})
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
+    action_head_type: str = field(default="flowmatching", metadata={"help": "Action head type: 'flowmatching', 'diffusion', or 'regression'."})
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -79,8 +88,23 @@ class GR00T_N1_5(PreTrainedModel):
         self.local_model_path = local_model_path
 
         self.backbone = EagleBackbone(**config.backbone_cfg)
-        action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
-        self.action_head = FlowmatchingActionHead(action_head_cfg)
+        
+        # Select action head based on config
+        action_head_type = getattr(config, 'action_head_type', 'flowmatching')
+        if action_head_type == "diffusion":
+            action_head_cfg = DiffusionActionHeadConfig(**config.action_head_cfg)
+            self.action_head = DiffusionActionHead(action_head_cfg)
+            print(f"Using DiffusionActionHead with prediction_type={action_head_cfg.prediction_type}")
+        elif action_head_type == "flowmatching":
+            action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
+            self.action_head = FlowmatchingActionHead(action_head_cfg)
+            print("Using FlowmatchingActionHead")
+        elif action_head_type == "regression":
+            action_head_cfg = RegressionActionHeadConfig(**config.action_head_cfg)
+            self.action_head = RegressionActionHead(action_head_cfg)
+            print("Using RegressionActionHead (simple behavioral cloning)")
+        else:
+            raise ValueError(f"Unknown action_head_type: {action_head_type}. Must be 'flowmatching', 'diffusion', or 'regression'.")
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
