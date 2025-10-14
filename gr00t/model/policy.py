@@ -27,7 +27,7 @@ from gr00t.data.dataset import ModalityConfig
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.schema import DatasetMetadata
 from gr00t.data.transform.base import ComposedModalityTransform
-from gr00t.model.gr00t_n1 import GR00T_N1_5
+from gr00t.model.gr00t_n1 import GR00T_N1_5, create_action_head_from_config
 
 COMPUTE_DTYPE = torch.bfloat16
 
@@ -332,17 +332,12 @@ class Gr00tPolicy(BasePolicy):
                 f"Policy: Recreating action head with action_horizon {expected_action_horizon} (was {model.action_head.config.action_horizon})"
             )
 
-            # Update the action head config
-            new_action_head_config = model.action_head.config
-            new_action_head_config.action_horizon = expected_action_horizon
+            # Update the action head config dictionary
+            new_action_head_cfg_dict = dict(model.config.action_head_cfg)
+            new_action_head_cfg_dict["action_horizon"] = expected_action_horizon
 
-            # Import the FlowmatchingActionHead class
-            from gr00t.model.action_head.flow_matching_action_head import (
-                FlowmatchingActionHead,
-            )
-
-            # Create new action head with updated config
-            new_action_head = FlowmatchingActionHead(new_action_head_config)
+            # Create new action head with updated config (dynamically determines type)
+            new_action_head = create_action_head_from_config(new_action_head_cfg_dict)
 
             # Copy the weights from the old action head to the new one
             new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
