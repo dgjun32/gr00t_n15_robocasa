@@ -1,4 +1,14 @@
-## Robocasa Installation Guide
+# Isaac-GR00T-robocasa
+
+This repository provides two main implementations:
+
+- **Robocasa Simulation Environment**: Setup and run GR00T policies on Robocasa simulation environments
+- **Multi-Objective Training and Inference with GR00T_N1_5**: Train and deploy policies with various action heads (Flow Matching, Diffusion, Regression)
+
+---
+
+<details>
+<summary><b>📦 Robocasa Installation Guide</b></summary>
 
 For setting up the robocasa simulation environment with GR00T:
 
@@ -63,8 +73,10 @@ conda install --force-reinstall idna
 conda install --force-reinstall certifi
 pip install --upgrade protobuf
 ```
+</details>
 
-### 5. Example Robocasa Evaluation Command
+<details>
+<summary><b>🚀 Example Robocasa Evaluation Command</b></summary>
 
 After installation, you can run robocasa evaluation with the following example command:
 
@@ -82,13 +94,263 @@ CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
     2>&1 | tee ./logs_inference_0810_visual_30k/PnPCabToCounter$(date +%Y%m%d_%H%M%S).log
 ```
 
-### 6. Training with Different Action Heads
+</details>
 
-GR00T supports different action head types for training. You can choose between diffusion and regression action heads depending on your task requirements.
+---
 
-For implementation details, refer to:
-- `gr00t/model/action_head/diffusion_action_head.py`
-- `gr00t/model/action_head/regression_action_head.py`
+<details>
+<summary><b>🎯 Multi-Objective Training and Inference with GR00T_N1_5</b></summary>
+
+This repository provides a flexible framework that enables training and inference with various training objectives while maintaining the same architecture. Simply by changing the action head type, you can train and deploy policies using different approaches such as Flow Matching, Diffusion, or Regression.
+
+### 1. How to Switch Action Heads
+
+The action head implementations can be found in the following files:
+- `gr00t/model/action_head/flow_matching_action_head.py` - Flow Matching approach (default)
+- `gr00t/model/action_head/diffusion_action_head.py` - DDPM/DDIM Diffusion approach
+- `gr00t/model/action_head/regression_action_head.py` - Direct Regression approach
+
+#### Config-based Automatic Action Head Creation
+
+Simply set `action_head_type` in `GR00T_N1_5_Config` and the appropriate action head will be automatically created:
+
+```python
+# gr00t/model/gr00t_n1.py
+
+@dataclass
+class GR00T_N1_5_Config(PretrainedConfig):
+    model_type = "gr00t_n1_5"
+    action_head_type: str = field(
+        default="flowmatching", 
+        metadata={"help": "Action head type: 'flowmatching', 'diffusion', or 'regression'."}
+    )
+    # ... other configs
+
+def create_action_head_from_config(action_head_cfg_dict: dict):
+    """Dynamically create the appropriate action head based on config"""
+    action_head_type = action_head_cfg_dict.get("action_head_type", None)
+    
+    if action_head_type == "regression":
+        action_head_cfg = RegressionActionHeadConfig(**action_head_cfg_dict)
+        return RegressionActionHead(action_head_cfg)
+    elif action_head_type == "diffusion":
+        action_head_cfg = DiffusionActionHeadConfig(**action_head_cfg_dict)
+        return DiffusionActionHead(action_head_cfg)
+    else:
+        action_head_cfg = FlowmatchingActionHeadConfig(**action_head_cfg_dict)
+        return FlowmatchingActionHead(action_head_cfg)
+```
+
+#### Automatic Application During Fine-tuning
+
+During training with `scripts/gr00t_finetune.py`, simply setting the `--action_head_type` parameter will automatically configure the desired action head through `GR00T_N1_5.from_pretrained()`:
+
+```bash
+# Example: Train with diffusion action head
+python scripts/gr00t_finetune.py \
+    --dataset-path /path/to/dataset \
+    --action_head_type diffusion \
+    ...
+```
+
+The `action_head_type` parameter is passed to `GR00T_N1_5.from_pretrained()`, which automatically loads the appropriate action head:
+
+```python
+# gr00t/model/gr00t_n1.py
+
+@classmethod
+def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):
+    action_head_type = kwargs.pop("action_head_type", None)
+    
+    config = cls.config_class.from_pretrained(local_model_path)
+    if hasattr(config, 'action_head_cfg') and isinstance(config.action_head_cfg, dict):
+        if action_head_type is not None:
+            config.action_head_cfg['action_head_type'] = action_head_type
+    
+    pretrained_model = super().from_pretrained(
+        local_model_path, local_model_path=local_model_path, config=config, **kwargs
+    )
+    
+    print("Loaded action head type : ", type(pretrained_model.action_head).__name__)
+    return pretrained_model
+```
+
+#### Automatic Config Loading During Inference
+
+The `_load_model()` function in `Gr00tPolicy` reads the saved config from the checkpoint and automatically applies the appropriate action head:
+
+```python
+# gr00t/model/policy.py
+
+def _load_model(self, model_path):
+    model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
+    
+    # Read action head information from saved config
+    new_action_head_cfg_dict = dict(model.config.action_head_cfg)
+    
+    # create_action_head_from_config automatically determines and creates the type
+    new_action_head = create_action_head_from_config(new_action_head_cfg_dict)
+    
+    # Load existing weights into the new action head
+    new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
+    model.action_head = new_action_head
+    
+    print("Updated action head type: ", type(model.action_head).__name__)
+    self.model = model
+```
+
+---
+
+### Implementaion Detail : Diffusion Action Head
+
+The diffusion action head generates actions based on DDPM (Denoising Diffusion Probabilistic Model).
+
+#### Training Objective
+
+During training, the model learns to recover actions by adding noise to clean actions:
+
+```python
+# gr00t/model/action_head/diffusion_action_head.py - forward()
+
+# Forward diffusion: x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
+actions = action_input.action
+noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+t_discretized = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+
+sqrt_alpha_prod = self.sqrt_alphas_cumprod[t_discretized][:, None, None]
+sqrt_one_minus_alpha_prod = self.sqrt_one_minus_alphas_cumprod[t_discretized][:, None, None]
+
+noisy_trajectory = sqrt_alpha_prod * actions + sqrt_one_minus_alpha_prod * noise
+
+# Target: predict noise (epsilon prediction)
+if self.prediction_type == "epsilon":
+    target = noise
+elif self.prediction_type == "sample":
+    target = actions
+
+# Encode noisy action with timestep information
+action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
+
+# ... model forward pass ...
+
+pred_actions = self.action_decoder(model_output, embodiment_id)
+loss = F.mse_loss(pred_actions, target, reduction="none") * action_mask
+```
+
+#### Inference (get_action)
+
+During inference, the model performs iterative denoising starting from random noise:
+
+
+```python
+# gr00t/model/action_head/diffusion_action_head.py - get_action()
+
+# 1. Initialize with random noise
+actions = torch.randn(
+    size=(batch_size, self.config.action_horizon, self.config.action_dim),
+    dtype=vl_embs.dtype, device=device
+) * self.prior_std
+
+# 2. Create timestep schedule for reverse process
+timestep_indices = torch.linspace(
+    self.num_timestep_buckets - 1, 0, num_steps, dtype=torch.long, device=device
+)
+
+# 3. Iterative denoising loop
+for i, t_idx in enumerate(timestep_indices):
+    timesteps_tensor = torch.full(
+        size=(batch_size,), fill_value=t_idx, device=device, dtype=torch.long
+    )
+    
+    # Encode current noisy action with timestep
+    action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+    
+    # Predict noise or x0
+    model_output = self.model(hidden_states=sa_embs, encoder_hidden_states=vl_embs, timestep=timesteps_tensor)
+    pred_noise_or_x0 = self.action_decoder(model_output, embodiment_id)
+    
+    # Recover clean action and update for next step
+    if self.prediction_type == "epsilon":
+        pred_x0 = (actions - sqrt_one_minus_alpha_prod_t * pred_noise_or_x0) / sqrt_alpha_prod_t
+    
+    # DDPM: stochastic sampling with noise
+    # DDIM: deterministic sampling without noise
+    if self.use_ddim:
+        actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * epsilon_t
+    else:
+        actions = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * noise
+
+return actions
+```
+
+- **Choice between DDPM (stochastic) or DDIM (deterministic) sampling**: The diffusion action head supports both DDPM for stochastic sampling and DDIM for deterministic sampling.
+- **Support for cosine or linear noise schedules**: You can configure the noise schedule type in the action head config.
+
+---
+
+### Implementaion Detail : Regression Action Head
+
+The regression action head directly predicts actions.
+
+#### Training Objective
+
+During training, the model learns to directly predict ground truth actions:
+
+```python
+# gr00t/model/action_head/regression_action_head.py - forward()
+
+# Ground truth actions
+gt_actions = action_input.action
+
+# Dummy action initialization (ones, not ground truth!)
+dummy_actions = torch.ones_like(gt_actions)
+t_discretized = torch.zeros(gt_actions.shape[0], device=device, dtype=torch.long)
+
+# Encode dummy action (timestep always 0 for regression)
+action_features = self.action_encoder(dummy_actions, t_discretized, embodiment_id)
+
+# ... model forward pass ...
+
+pred = self.action_decoder(model_output, embodiment_id)
+pred_actions = pred[:, -gt_actions.shape[1] :]
+
+# Direct MSE loss with ground truth
+loss = F.mse_loss(pred_actions, gt_actions, reduction="none") * action_mask
+```
+
+#### Inference (get_action)
+
+During inference, actions are directly generated with a single forward pass:
+
+```python
+# gr00t/model/action_head/regression_action_head.py - get_action()
+
+# 1. Initialize with ones (non-zero activation)
+actions = torch.ones(
+    size=(batch_size, self.config.action_horizon, self.config.action_dim),
+    dtype=vl_embs.dtype, device=device
+)
+
+# 2. Single forward pass (timestep always 0)
+timesteps_tensor = torch.zeros(batch_size, device=device, dtype=torch.long)
+action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+
+# 3. Direct action prediction
+model_output = self.model(
+    hidden_states=sa_embs, 
+    encoder_hidden_states=vl_embs, 
+    timestep=timesteps_tensor
+)
+pred_actions = self.action_decoder(model_output, embodiment_id)[:, -self.action_horizon :]
+
+return pred_actions
+```
+
+---
+</details>
+
+<details>
+<summary><b>🔧 Multi-objective Training Commands</b></summary>
 
 #### Diffusion Action Head Training
 
@@ -123,7 +385,11 @@ CUDA_VISIBLE_DEVICES=0 python scripts/gr00t_finetune.py \
     2>&1 | tee ./training_logs/training_$(date +%Y%m%d_%H%M%S).log
 ```
 
-### 7. Inference with Different Action Heads
+</details>
+
+
+<details>
+<summary><b>🚀 Multi-objective Inference Commands</b></summary>
 
 After training with different action heads, you can run inference using various denoising configurations.
 
@@ -284,372 +550,5 @@ CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_on_dataset.py \
 
 The evaluation results will be saved in the specified output directory, including action comparison plots and MSE metrics.
 
----
-
-<div align="center">
-
-
-  <img src="media/header_compress.png" width="800" alt="NVIDIA Isaac GR00T N1.5 Header">
-  
-  <!-- --- -->
-  
-  <p style="font-size: 1.2em;">
-    <a href="https://developer.nvidia.com/isaac/gr00t"><strong>Website</strong></a> | 
-    <a href="https://huggingface.co/nvidia/GR00T-N1.5-3B"><strong>Model</strong></a> |
-    <a href="https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim"><strong>Dataset</strong></a> |
-    <a href="https://arxiv.org/abs/2503.14734"><strong>Paper</strong></a>
-  </p>
-</div>
-
-[![CI](https://github.com/NVIDIA/Isaac-GR00T/actions/workflows/main.yml/badge.svg)](https://github.com/NVIDIA/Isaac-GR00T/actions/workflows/main.yml)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![Imports: isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
-[![GitHub star chart](https://img.shields.io/github/stars/NVIDIA/Isaac-GR00T?style=flat-square)](https://star-history.com/#NVIDIA/Isaac-GR00T)
-[![Open Issues](https://img.shields.io/github/issues-raw/NVIDIA/Isaac-GR00T?style=flat-square)](https://github.com/NVIDIA/Isaac-GR00T/issues)
-
-## NVIDIA Isaac GR00T
-
-<div align="center">
-<img src="media/robot-demo.gif" width="800" alt="NVIDIA Isaac GR00T N1.5 Header">
-</div>
-
-> We just released GR00T N1.5, an updated version of GR00T N1 with improved performance and new features. Check out the release blog post (https://research.nvidia.com/labs/gear/gr00t-n1_5/) for more details.
-
-> To use the older version, N1, please checkout the [n1-release](https://github.com/NVIDIA/Isaac-GR00T/tree/n1-release) release branch.
-
-NVIDIA Isaac GR00T N1.5 is an open foundation model for generalized humanoid robot reasoning and skills. This cross-embodiment model takes multimodal input, including language and images, to perform manipulation tasks in diverse environments.
-
-GR00T N1.5 is trained on an expansive humanoid dataset, consisting of real captured data, synthetic data generated using the components of NVIDIA Isaac GR00T Blueprint ([examples of neural-generated trajectories](./media/videos)), and internet-scale video data. It is adaptable through post-training for specific embodiments, tasks and environments.
-
-<div align="center">
-<img src="media/real-data.gif" height="150" alt="real-robot-data">
-<img src="media/sim-data.gif" height="150" alt="sim-robot-data">
-</div>
-
-The neural network architecture of GR00T N1.5 is a combination of vision-language foundation model and diffusion transformer head that denoises continuous actions. Here is a schematic diagram of the architecture:
-
-<div align="center">
-<img src="media/model-architecture.png" width="800" alt="model-architecture">
-</div>
-
-Here is the general procedure to use GR00T N1.5:
-
-1. Assume the user has already collected a dataset of robot demonstrations in the form of (video, state, action) triplets. 
-2. The user will first convert the demonstration data into the LeRobot compatible data schema (more info in [`getting_started/LeRobot_compatible_data_schema.md`](getting_started/LeRobot_compatible_data_schema.md)), which is compatible with the upstream [Huggingface LeRobot](https://github.com/huggingface/lerobot).
-3. Our repo provides examples of different configurations for training with different robot embodiments.
-4. Our repo provides convenient scripts for finetuning the pre-trained GR00T N1.5 model on user's data, and running inference.
-5. The user will connect the `Gr00tPolicy` to the robot controller to execute actions on their target hardware.
-
-## What's New in GR00T N1.5
-
-GR00T N1.5 represents a significant upgrade over GR00T N1, with improvements in both model architecture and data leading to better performance in many aspects.
-
-### Model and Data Improvements
-
-- **Frozen VLM**: The vision-language model remains frozen during both pretraining and finetuning, preserving language understanding and improving generalization
-- **Enhanced VLM Grounding**: Updated to Eagle 2.5 with improved grounding capabilities and physical understanding, achieving 40.4 IoU on GR-1 grounding tasks (vs 35.5 for Qwen2.5VL).
-- **Simplified Adapter**: Streamlined MLP connection between vision encoder and LLM with added layer normalization.
-- **FLARE Integration**: Added Future Latent Representation Alignment ([FLARE](https://research.nvidia.com/labs/gear/flare)) objective alongside flow matching loss, enabling effective learning from human ego videos
-- **DreamGen Integration**: Incorporated synthetic neural trajectories generated via [DreamGen](https://research.nvidia.com/labs/gear/dreamgen) to enable generalization to novel behaviors and tasks beyond teleoperation data
-
-### Performance Improvements
-
-- **Language Following**: Significantly improved language command following versus N1 - 93.3% vs 46.6% on GR-1 manipulation tasks.
-- **Data Efficiency**: Better performance in low-data regimes (0-shot and few-shot scenarios)
-- **Better Novel Object Generalization**
-- **New Embodiment Heads**: Added support for single arm robots with end-effector (EEF) control space via `EmbodimentTag.OXE_DROID` head, and humanoid robots with grippers via `EmbodimentTag.AGIBOT_GENIE1` head, expanding beyond joint space control to enable broader robot compatibility
-
-These improvements make GR00T N1.5 particularly effective for applications requiring strong language understanding, few-shot adaptation, and generalization to novel objects and environments.
-See our GR00T N1.5 [tech blog](https://research.nvidia.com/labs/gear/gr00t-n1_5) for more details on the model and experimental results.
-
-## Target Audience
-
-GR00T N1.5 is intended for researchers and professionals in humanoid robotics. This repository provides tools to:
-
-- Leverage a pre-trained foundation model for robot control
-- Fine-tune on small, custom datasets
-- Adapt the model to specific robotics tasks with minimal data
-- Deploy the model for inference
-
-  The focus is on enabling customization of robot behaviors through finetuning.
-
-## Prerequisites
-
-- We have tested the code on Ubuntu 20.04 and 22.04, GPU: H100, L40, RTX 4090 and A6000 for finetuning and Python==3.10, CUDA version 12.4.
-- For inference, we have tested on Ubuntu 20.04 and 22.04, GPU: RTX 3090, RTX 4090 and A6000.
-- If you haven't installed CUDA 12.4, please follow the instructions [here](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/) to install it.
-- If you haven't installed tensorrt, please follow the instructions [here](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/installing.html#) to install it.
-- Please make sure you have the following dependencies installed in your system: `ffmpeg`, `libsm6`, `libxext6`
-
-## Installation Guide
-
-Clone the repo:
-
-```sh
-git clone https://github.com/NVIDIA/Isaac-GR00T
-cd Isaac-GR00T
-```
-
-Create a new conda environment and install the dependencies. We recommend Python 3.10:
-
-> Note that, please make sure your CUDA version is 12.4. Otherwise, you may have a hard time with properly configuring flash-attn module.
-
-```sh
-conda create -n gr00t python=3.10
-conda activate gr00t
-pip install --upgrade setuptools
-pip install -e .[base]
-pip install --no-build-isolation flash-attn==2.7.1.post4 
-```
-
-## Getting started with this repo
-
-We provide accessible Jupyter notebooks and detailed documentation in the [`./getting_started`](./getting_started) folder. Utility scripts can be found in the [`./scripts`](./scripts) folder. Additionally, a comprehensive tutorial for finetuning the model on the SO-101 robot is available on [HuggingFace](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning).
-
-## 1. Data Format & Loading
-
-- To load and process the data, we use [Huggingface LeRobot data](https://github.com/huggingface/lerobot), but with a more detailed modality and annotation schema (we call it "LeRobot compatible data schema").
-- An example of LeRobot dataset is stored here: `./demo_data/robot_sim.PickNPlace`. (with additional [`modality.json`](./demo_data/robot_sim.PickNPlace/meta/modality.json) file)
-- Detailed explanation of the dataset format is available in [`getting_started/LeRobot_compatible_data_schema.md`](getting_started/LeRobot_compatible_data_schema.md)
-- We support multiple embodiments with the [`EmbodimentTag`](getting_started/4_deeper_understanding.md#embodiment-action-head-fine-tuning) system.
-- Once your data is organized in this format, you can load the data using `LeRobotSingleDataset` class.
-
-```python
-from gr00t.data.dataset import LeRobotSingleDataset
-from gr00t.data.embodiment_tags import EmbodimentTag
-from gr00t.data.dataset import ModalityConfig
-from gr00t.experiment.data_config import DATA_CONFIG_MAP
-
-# get the data config
-data_config = DATA_CONFIG_MAP["fourier_gr1_arms_only"]
-
-# get the modality configs and transforms
-modality_config = data_config.modality_config()
-transforms = data_config.transform()
-
-# This is a LeRobotSingleDataset object that loads the data from the given dataset path.
-dataset = LeRobotSingleDataset(
-    dataset_path="demo_data/robot_sim.PickNPlace",
-    modality_configs=modality_config,
-    transforms=None,  # we can choose to not apply any transforms
-    embodiment_tag=EmbodimentTag.GR1, # the embodiment to use
-)
-
-# This is an example of how to access the data.
-dataset[5]
-```
-
-- [`getting_started/0_load_dataset.ipynb`](getting_started/0_load_dataset.ipynb) is an interactive tutorial on how to load the data and process it to interface with the GR00T N1.5 model.
-- [`scripts/load_dataset.py`](scripts/load_dataset.py) is an executable script with the same content as the notebook.
-
-Try run the script to load the dataset
-```bash
-python scripts/load_dataset.py --dataset-path ./demo_data/robot_sim.PickNPlace
-```
-
-## 2. Inference
-
-* The GR00T N1.5 model is hosted on [Huggingface](https://huggingface.co/nvidia/GR00T-N1.5-3B)
-* Example cross embodiment dataset is available at [demo_data/robot_sim.PickNPlace](./demo_data/robot_sim.PickNPlace)
-
-### 2.1 Inference with PyTorch
-
-```python
-from gr00t.model.policy import Gr00tPolicy
-from gr00t.data.embodiment_tags import EmbodimentTag
-
-# 1. Load the modality config and transforms, or use above
-modality_config = ComposedModalityConfig(...)
-transforms = ComposedModalityTransform(...)
-
-# 2. Load the dataset
-dataset = LeRobotSingleDataset(.....<Same as above>....)
-
-# 3. Load pre-trained model
-policy = Gr00tPolicy(
-    model_path="nvidia/GR00T-N1.5-3B",
-    modality_config=modality_config,
-    modality_transform=transforms,
-    embodiment_tag=EmbodimentTag.GR1,
-    device="cuda"
-)
-
-# 4. Run inference
-action_chunk = policy.get_action(dataset[0])
-```
-
-- [`getting_started/1_gr00t_inference.ipynb`](getting_started/1_gr00t_inference.ipynb) is an interactive Jupyter notebook tutorial to build an inference pipeline.
-
-User can also run the inference service using the provided script. The inference service can run in either server mode or client mode.
-
-```bash
-python scripts/inference_service.py --model-path nvidia/GR00T-N1.5-3B --server
-```
-
-On a different terminal, run the client mode to send requests to the server.
-```bash
-python scripts/inference_service.py  --client
-```
-
-### 2.2 Inference with Python TensorRT (Optional)
-
-To inference with ONNX and TensorRT, please refer to [`deployment_scripts/README.md`](deployment_scripts/README.md).
-
-## 3. Fine-Tuning
-
-Users can run the finetuning script below to finetune the model with the example dataset. A tutorial is available in [`getting_started/2_finetuning.ipynb`](getting_started/2_finetuning.ipynb).
-
-Then run the finetuning script:
-```bash
-# first run --help to see the available arguments
-python scripts/gr00t_finetune.py --help
-
-# then run the script
-python scripts/gr00t_finetune.py --dataset-path ./demo_data/robot_sim.PickNPlace --num-gpus 1
-```
-
-**Note**: If you are finetuning on a 4090, you need to pass the `--no-tune_diffusion_model` flag when running `gr00t_finetune.py` to avoid CUDA out of memory.
-
-The recommended finetuning configuration is to boost your batch size to the max, and train for 20k steps.
-
-*Hardware Performance Considerations*
-- **Finetuning Performance**: We used 1 H100 node or L40 node for optimal finetuning. Other hardware configurations (e.g. A6000, RTX 4090) will also work but may take longer to converge. The exact batch size is dependent on the hardware, and on which component of the model is being tuned.
-- **LoRA finetuning**: We used 2 A6000 GPUs or 2 RTX 4090 GPUs for LoRA finetuning. Users can try out different configurations for effective finetuning.
-- **Inference Performance**: For real-time inference, most modern GPUs perform similarly when processing a single sample. Our benchmarks show minimal difference between L40 and RTX 4090 for inference speed.
-
-For new embodiment finetuning, checkout our notebook in [`getting_started/3_0_new_embodiment_finetuning.md`](getting_started/3_0_new_embodiment_finetuning.md).
-
-### Choosing the Right Embodiment Head
-
-<div align="center">
-<img src="media/robots-banner.png" width="1000" alt="robots-banner">
-</div>
-
-GR00T N1.5 provides three pretrained embodiment heads optimized for different robot configurations:
-
-- **`EmbodimentTag.GR1`**: Designed for humanoid robots with dexterous hands using absolute joint space control
-- **`EmbodimentTag.OXE_DROID`**: Optimized for single arm robots using delta end-effector (EEF) control  
-- **`EmbodimentTag.AGIBOT_GENIE1`**: Built for humanoid robots with grippers using absolute joint space control
-- **`EmbodimentTag.NEW_EMBODIMENT`**: (Non-pretrained) New embodiment head for finetuning on new robot embodiments
-
-Select the embodiment head that best matches your robot's configuration for optimal finetuning performance. For detailed information on the observation and action spaces, see [`EmbodimentTag`](getting_started/4_deeper_understanding.md#embodiment-action-head-fine-tuning).
-
-
-### Sim Env: [robocasa-gr1-tabletop-tasks](https://github.com/robocasa/robocasa-gr1-tabletop-tasks)
-
-Sample dataset for finetuning can be downloaed from our huggingface [here](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim)
-
-For Simulation Evaluation, please refer to [robocasa-gr1-tabletop-tasks](https://github.com/robocasa/robocasa-gr1-tabletop-tasks)
-
-
-## 4. Evaluation
-
-To conduct an offline evaluation of the model, we provide a script that evaluates the model on a dataset and plots it out. Quick try: `python scripts/eval_policy.py --plot --model_path nvidia/GR00T-N1.5-3B`
-
-Or you can run the newly trained model in client-server mode.
-
-Run the newly trained model
-```bash
-python scripts/inference_service.py --server \
-    --model-path <MODEL_PATH> \
-    --embodiment-tag new_embodiment
-    --data-config <DATA_CONFIG>
-```
-
-Run the offline evaluation script
-```bash
-python scripts/eval_policy.py --plot \
-    --dataset-path <DATASET_PATH> \
-    --embodiment-tag new_embodiment \
-    --data-config <DATA_CONFIG>
-```
-
-You will then see a plot of Ground Truth vs Predicted actions, along with unnormed MSE of the actions. This would give you an indication if the policy is performing well on the dataset.
-
-## Jetson Deployment
-
-A detailed guide for deploying GR00T N1.5 on Jetson is available in [`deployment_scripts/README.md`](deployment_scripts/README.md).
-
-Here's comparison of E2E performance between PyTorch and TensorRT on Orin
-
-<div align="center">
-<img src="media/orin-perf.png" width="800" alt="orin-perf">
-</div>
-
-Model latency measured by `trtexec` with batch_size=1.     
-| Model Name                                     |Orin benchmark perf (ms)  |Precision|
-|:----------------------------------------------:|:------------------------:|:-------:|
-| Action_Head - process_backbone_output          | 5.17                     |FP16     |
-| Action_Head - state_encoder                    | 0.05                     |FP16     |
-| Action_Head - action_encoder                   | 0.20                     |FP16     |
-| Action_Head - DiT                              | 7.77                     |FP16     |
-| Action_Head - action_decoder                   | 0.04                     |FP16     |
-| VLM - ViT                                      |11.96                     |FP16     |
-| VLM - LLM                                      |17.25                     |FP16     |  
-      
-**Note**: The module latency (e.g., DiT Block) in pipeline is slightly longer than the model latency in benchmark table above because the module (e.g., Action_Head - DiT) latency not only includes the model latency in table above but also accounts for the overhead of data transfer from PyTorch to TRT and returning from TRT to PyTorch.
-
-# FAQ
-
-*Does it work on CUDA ARM Linux?*
-- Yes, visit [jetson-containers](https://github.com/dusty-nv/jetson-containers/tree/master/packages/robots/Isaac-GR00T). 
-
-*I have my own data, what should I do next for finetuning?*
-- This repo assumes that your data is already organized according to the LeRobot format. 
-
-
-*What is Modality Config? Embodiment Tag? and Transform Config?*
-- Embodiment Tag: Defines the robot embodiment used, non-pretrained embodiment tags are all considered as `new_embodiment`.
-- Modality Config: Defines the modalities used in the dataset (e.g. video, state, action)
-- Transform Config: Defines the Data Transforms applied to the data during dataloading.
-- For more details, see [`getting_started/4_deeper_understanding.md`](getting_started/4_deeper_understanding.md)
-
-*What is the inference speed for Gr00tPolicy?*
-
-Below are benchmark results based on a single H100 GPU. Performance will be slightly slower on consumer GPUs like RTX 4090 for inference (single sample processing):
-
-| Module | Inference Speed |
-|----------|------------------|
-| VLM Backbone | 23.18 ms |
-| Action Head with 4 diffusion steps | 4 x 6.18 ms = 24.7 ms |
-| Full Model | 47.88 ms |
-
-We noticed that 4 denoising steps are sufficient during inference.
-
-*How to train with multiple datasets?*
-
-You can train with multiple datasets by providing a list of dataset paths to the `dataset_path` argument.
-
-```bash
-python scripts/gr00t_finetune.py --dataset-path <DATASET1> <DATASET2> --num-gpus 1
-```
-
-By default, the `gr00t_finetune.py` imposes equal weights to all datasets, with `balance_dataset_weights` and `balance_trajectory_weights` set to `True`. For more details, see the `LeRobotMixtureDataset` class definition in `gr00t/data/dataset.py`. Users can also use the `LeRobotMixtureDataset` class directly to train with multiple datasets with different embodiments, transforms, and sampling weights.
-
-*Is LoRA finetuning supported?*
-
-Yes, you can use LoRA finetuning to finetune the model. This can be enabled by indicating `--lora_rank 64  --lora_alpha 128` in the finetuning script. However, we recommend using the full model finetuning for better performance.
-
-# Contributing
-
-For more details, see [CONTRIBUTING.md](CONTRIBUTING.md)
-
-
-## License 
-
-```
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
+</details>
+</details>
