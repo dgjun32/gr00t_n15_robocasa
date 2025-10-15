@@ -316,6 +316,9 @@ class GR00T_N1_5(PreTrainedModel):
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model
         )
+
+        print("Loaded action head type : ", type(pretrained_model.action_head).__name__)
+
         return pretrained_model
 
 
