@@ -45,6 +45,32 @@ ERROR_MSG = "Error: unexpected input/output"
 N_COLOR_CHANNELS = 3
 
 
+def create_action_head_from_config(action_head_cfg_dict: dict):
+    """
+    Dynamically create an action head based on the config dictionary.
+    Determines the action head type from the config and creates the appropriate instance.
+    
+    Args:
+        action_head_cfg_dict: Dictionary containing action head configuration
+        
+    Returns:
+        An instance of either FlowmatchingActionHead or RegressionActionHead
+    """
+    # Check for explicit action_head_type field
+    action_head_type = action_head_cfg_dict.get("action_head_type", None)
+    
+    # Determine which action head to use
+    if action_head_type == "regression":
+        action_head_cfg = RegressionActionHeadConfig(**action_head_cfg_dict)
+        return RegressionActionHead(action_head_cfg)
+    elif action_head_type == "diffusion":
+        action_head_cfg = DiffusionActionHeadConfig(**action_head_cfg_dict)
+        return DiffusionActionHead(action_head_cfg)
+    else:
+        action_head_cfg = FlowmatchingActionHeadConfig(**action_head_cfg_dict)
+        return FlowmatchingActionHead(action_head_cfg)
+
+
 # config
 @dataclass
 class GR00T_N1_5_Config(PretrainedConfig):
@@ -88,24 +114,7 @@ class GR00T_N1_5(PreTrainedModel):
         self.local_model_path = local_model_path
 
         self.backbone = EagleBackbone(**config.backbone_cfg)
-        
-        # Select action head based on config
-        action_head_type = getattr(config, 'action_head_type', 'flowmatching')
-        if action_head_type == "diffusion":
-            action_head_cfg = DiffusionActionHeadConfig(**config.action_head_cfg)
-            self.action_head = DiffusionActionHead(action_head_cfg)
-            print(f"Using DiffusionActionHead with prediction_type={action_head_cfg.prediction_type}")
-        elif action_head_type == "flowmatching":
-            action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
-            self.action_head = FlowmatchingActionHead(action_head_cfg)
-            print("Using FlowmatchingActionHead")
-        elif action_head_type == "regression":
-            action_head_cfg = RegressionActionHeadConfig(**config.action_head_cfg)
-            self.action_head = RegressionActionHead(action_head_cfg)
-            print("Using RegressionActionHead (simple behavioral cloning)")
-        else:
-            raise ValueError(f"Unknown action_head_type: {action_head_type}. Must be 'flowmatching', 'diffusion', or 'regression'.")
-
+        self.action_head = create_action_head_from_config(config.action_head_cfg)
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
@@ -265,12 +274,16 @@ class GR00T_N1_5(PreTrainedModel):
         tune_llm = kwargs.pop("tune_llm", False)
         tune_projector = kwargs.pop("tune_projector", True)
         tune_diffusion_model = kwargs.pop("tune_diffusion_model", True)
+        action_head_type = kwargs.pop("action_head_type", None)
+        action_horizon = kwargs.pop("action_horizon", None)
 
         print(f"Loading pretrained dual brain from {pretrained_model_name_or_path}")
         print(f"Tune backbone vision tower: {tune_visual}")
         print(f"Tune backbone LLM: {tune_llm}")
         print(f"Tune action head projector: {tune_projector}")
         print(f"Tune action head DiT: {tune_diffusion_model}")
+        if action_head_type is not None:
+            print(f"Action head type: {action_head_type}")
 
         # get the current model path being downloaded
         try:
@@ -284,8 +297,17 @@ class GR00T_N1_5(PreTrainedModel):
             )
             local_model_path = pretrained_model_name_or_path
 
+        config = cls.config_class.from_pretrained(local_model_path)
+        if hasattr(config, 'action_head_cfg') and isinstance(config.action_head_cfg, dict):
+            if action_head_type is not None:
+                config.action_head_cfg['action_head_type'] = action_head_type
+            if action_horizon is not None:
+                config.action_head_cfg['action_horizon'] = action_horizon
+                config.action_horizon = action_horizon
+        
+        # Pass the modified config to from_pretrained
         pretrained_model = super().from_pretrained(
-            local_model_path, local_model_path=local_model_path, **kwargs
+            local_model_path, local_model_path=local_model_path, config=config, **kwargs
         )
 
         pretrained_model.backbone.set_trainable_parameters(
@@ -294,6 +316,9 @@ class GR00T_N1_5(PreTrainedModel):
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model
         )
+
+        print("Loaded action head type : ", type(pretrained_model.action_head).__name__)
+
         return pretrained_model
 
 

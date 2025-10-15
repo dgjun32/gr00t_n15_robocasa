@@ -27,7 +27,7 @@ from gr00t.data.dataset import ModalityConfig
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.schema import DatasetMetadata
 from gr00t.data.transform.base import ComposedModalityTransform
-from gr00t.model.gr00t_n1 import GR00T_N1_5
+from gr00t.model.gr00t_n1 import GR00T_N1_5, create_action_head_from_config
 
 COMPUTE_DTYPE = torch.bfloat16
 
@@ -323,6 +323,9 @@ class Gr00tPolicy(BasePolicy):
         model.eval()  # Set model to eval mode
         model.to(device=self.device)  # type: ignore
 
+        # Update the action head config dictionary
+        new_action_head_cfg_dict = dict(model.config.action_head_cfg)
+
         # Update action_horizon to match modality config
         # Get the expected action horizon from the modality config
         expected_action_horizon = len(self._modality_config["action"].delta_indices)
@@ -332,28 +335,26 @@ class Gr00tPolicy(BasePolicy):
                 f"Policy: Recreating action head with action_horizon {expected_action_horizon} (was {model.action_head.config.action_horizon})"
             )
 
-            # Update the action head config
-            new_action_head_config = model.action_head.config
-            new_action_head_config.action_horizon = expected_action_horizon
-
-            # Import the FlowmatchingActionHead class
-            from gr00t.model.action_head.flow_matching_action_head import (
-                FlowmatchingActionHead,
-            )
-
-            # Create new action head with updated config
-            new_action_head = FlowmatchingActionHead(new_action_head_config)
-
-            # Copy the weights from the old action head to the new one
-            new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
-
-            # Replace the action head
-            model.action_head = new_action_head
-
             # Update model config AND the action_head_cfg dictionary that gets saved
             model.config.action_horizon = expected_action_horizon
             model.action_horizon = expected_action_horizon
             model.config.action_head_cfg["action_horizon"] = expected_action_horizon
+            new_action_head_cfg_dict["action_horizon"] = expected_action_horizon
+
+        # Create new action head with updated config (dynamically determines type)
+        new_action_head = create_action_head_from_config(new_action_head_cfg_dict)
+
+        # Move new action head to the same device as the old one
+        device = next(model.action_head.parameters()).device
+        new_action_head = new_action_head.to(device)
+
+        # Copy the weights from the old action head to the new one
+        new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
+
+        # Replace the action head
+        model.action_head = new_action_head
+        
+        print("Updated action head type: ", type(model.action_head).__name__)
 
         self.model = model
 
