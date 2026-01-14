@@ -102,6 +102,7 @@ class RoboCasaWrapper(gym.Wrapper):
                 "action.control_mode": gym.spaces.Box(low=low[11:12], high=high[11:12], dtype=np.int64),
             }
         )
+ 
         self.action_space_keys = [
             "action.end_effector_position",
             "action.end_effector_rotation",
@@ -134,8 +135,10 @@ class RoboCasaWrapper(gym.Wrapper):
                 if key in self._image_keys: 
                     value = value[::-1]
                 new_obs[self._robocasa_keys_to_gr00t_keys[key]] = value
+    
         new_obs["annotation.human.action.task_description"] = [self.language_instruction]
         info["is_success"] = self.is_success()["task"]
+        self.obs = new_obs
         return new_obs, info
 
     def render(self, mode="rgb_array"):
@@ -154,9 +157,29 @@ class RoboCasaWrapper(gym.Wrapper):
         return {"task": succ}
 
     def convert_action(self, action):
+        """
+        Convert action from policy output format to environment format.
+        
+        Policy outputs dict with action in this order (when flattened):
+            0-4:   base_motion
+            4-5:   control_mode
+            5-8:   end_effector_position
+            8-11:  end_effector_rotation
+            11-12: gripper_close
+        
+        Environment expects flat array in this order:
+            0-3:   end_effector_position
+            3-6:   end_effector_rotation
+            6-7:   gripper_close
+            7-11:  base_motion
+            11-12: control_mode
+        """
         # binarize the gripper close and control mode action
         for key in ["action.gripper_close", "action.control_mode"]:
             action[key] = np.where(action[key] > 0, 1, -1)
+        
+        # Reorder actions to match environment's expected order
+        # Use self.action_space_keys which is already in the correct environment order
         elems = [
             action[key] for key in self.action_space_keys
         ]  # this is to strictly follow the order of the action space
@@ -175,6 +198,7 @@ class RoboCasaWrapper(gym.Wrapper):
         # print("task : ", new_obs["annotation.human.action.task_description"])
         info["is_success"] = self.is_success()["task"]
         terminated = terminated or info["is_success"]
+        self.obs = new_obs
         return new_obs, reward, terminated, truncated, info
 
     def close(self):

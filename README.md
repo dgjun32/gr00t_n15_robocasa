@@ -81,17 +81,30 @@ pip install --upgrade protobuf
 After installation, you can run robocasa evaluation with the following example command:
 
 ```sh
-CUDA_VISIBLE_DEVICES=7 python scripts/eval_policy_robocasa.py \
-    --model_path checkpoint/robocasa8_b256_visual/checkpoint-30000 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 python scripts/eval_policy_robocasa_lh.py \
+    --model_path checkpoints/checkpoint-40000 \
+    --action_horizon 8 \
+    --planner_model_name gemini-robotics-er-1.5-preview \
+    --subgoal_interval 200 \
+    --video_backend decord \
+    --embodiment_tag new_embodiment \
+    --data_config single_panda_gripper \
+    --env_name OpenDrawer \
+    --num_episodes 10 \
+    --video_path /home/dongjun/Isaac-GR00T-robocasa/eval_test/OpenDrawer \
+    --max_episode_steps 1000
+
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 python scripts/eval_policy_robocasa.py \
+    --model_path checkpoints/checkpoint-60000 \
     --action_horizon 16 \
     --video_backend decord \
     --embodiment_tag new_embodiment \
     --data_config single_panda_gripper \
     --env_name PnPCabToCounter \
-    --num_episodes 100 \
-    --video_path /home/sinjaekang/sinjae/Issac-GR00T-robocasa/eval_video_visual_30k_0810/PnPCabToCounter \
-    --max_episode_steps 1000 \
-    2>&1 | tee ./logs_inference_0810_visual_30k/PnPCabToCounter$(date +%Y%m%d_%H%M%S).log
+    --num_episodes 10 \
+    --video_path /home/dongjun/Isaac-GR00T-robocasa/eval_test/PnPCabToCounter \
+    --max_episode_steps 1000
 ```
 
 </details>

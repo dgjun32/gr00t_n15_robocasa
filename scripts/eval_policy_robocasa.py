@@ -216,9 +216,12 @@ if __name__ == "__main__":
     record_video = args.video_path is not None
     if record_video:
         video_base_path = Path(args.video_path)
-        # video_base_path.mkdir(parents=True, exist_ok=True)
-        episode_trigger = lambda t: t % 1 == 0  # noqa
+        video_base_path.mkdir(parents=True, exist_ok=True)
+        print(f"Video will be saved to: {video_base_path.absolute()}")
+        # Record every episode (episode_id starts from 1)
+        episode_trigger = lambda t: True  # Record all episodes
         env = RecordVideo(env, video_base_path, disable_logger=True, episode_trigger=episode_trigger, fps=20)
+        print("RecordVideo wrapper added successfully")
 
     env = MultiStepWrapper(
         env,
@@ -237,11 +240,42 @@ if __name__ == "__main__":
                 new_action[k] = v
         return new_action
 
+
     # main evaluation loop
     stats = defaultdict(list)
+    
+    # Helper function to sanitize filename
+    def sanitize_filename(name):
+        """Remove or replace characters that are invalid in filenames."""
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            name = name.replace(char, '_')
+        # Also replace spaces and limit length
+        name = name.replace(' ', '_')
+        return name[:100]  # Limit length to avoid too long filenames
+    
+    # Store episode info for renaming videos later
+    episode_info_list = []
+    
     for i in trange(args.num_episodes):
 
         obs, info = env.reset()
+        # get initial pose of the robot ############
+        unwrapped_env = env.unwrapped
+        sim = unwrapped_env.sim
+        robot = unwrapped_env.robots[0]
+        initial_robot_qpos = {}
+        initial_robot_qvel = {}
+        # Use robot_joints instead of joints
+        for joint in robot.robot_joints:
+            joint_id = sim.model.joint_name2id(joint)
+            qpos_addr = sim.model.jnt_qposadr[joint_id]
+            qvel_addr = sim.model.jnt_dofadr[joint_id]
+            initial_robot_qpos[joint] = sim.data.qpos[qpos_addr].copy()
+            initial_robot_qvel[joint] = sim.data.qvel[qvel_addr].copy()
+        ############################################
+        task_instruction = env.unwrapped.get_ep_meta()['lang']
+        print(f"Task instruction: {task_instruction}")
         pbar = tqdm(
             total=args.max_episode_steps, desc=f"Episode {i + 1} / {env.unwrapped.get_ep_meta()['lang']}", leave=False
         )
@@ -266,10 +300,14 @@ if __name__ == "__main__":
 
             post_action = postprocess_action(action)
             next_obs, reward, terminated, truncated, info = env.step(post_action)
+
             done = terminated or truncated
             step += args.action_horizon
             obs = next_obs
             pbar.update(args.action_horizon)
+            
+            if step >= args.max_episode_steps:
+                break
         add_to(stats, flatten({"is_success": info["is_success"]}))
         
         # Calculate cumulative success rate
@@ -278,10 +316,62 @@ if __name__ == "__main__":
         success_rate = total_successes / total_episodes
         is_success_val = bool(info["is_success"])
         
-        print(f"Result: {i}, {is_success_val} ({total_successes}/{total_episodes} = {success_rate:.3f})")
+        # Store episode info for later video renaming (videos are saved after env.close())
+        if record_video:
+            episode_info_list.append({
+                "episode_idx": i + 1,
+                "task_instruction": task_instruction,
+                "is_success": is_success_val,
+            })
+        
+        print("--------------------------------")
+        print(f"Episode {i+1}: Success = {is_success_val} | Success rate = {success_rate:.3f}")
+        
         pbar.close()
 
+    # Close environment to ensure video is saved
     env.close()
+
+    # Rename videos with custom format after all videos are saved
+    if record_video:
+        print("\n" + "="*80)
+        print("Renaming video files...")
+        print("="*80)
+        
+        renamed_count = 0
+        for ep_info in episode_info_list:
+            episode_idx = ep_info["episode_idx"]
+            task_instruction = ep_info["task_instruction"]
+            is_success = ep_info["is_success"]
+            
+            # Original filename created by RecordVideo
+            old_filename = f"rl-video-episode-{episode_idx}.mp4"
+            old_video_path = video_base_path / old_filename
+            
+            if old_video_path.exists():
+                # Create new filename
+                success_label = "success" if is_success else "fail"
+                task_clean = sanitize_filename(task_instruction)
+                new_filename = f"{success_label}_{task_clean}_{episode_idx}.mp4"
+                new_video_path = video_base_path / new_filename
+                
+                # Rename the file
+                old_video_path.rename(new_video_path)
+                print(f"✓ Episode {episode_idx}: {old_filename} → {new_filename}")
+                renamed_count += 1
+            else:
+                print(f"✗ Episode {episode_idx}: Video file not found: {old_filename}")
+        
+        print(f"\nRenamed {renamed_count}/{len(episode_info_list)} video files")
+        
+        # List all final video files
+        video_files = list(video_base_path.glob("*.mp4"))
+        print(f"\nFinal video files: {len(video_files)}")
+        for video_file in sorted(video_files):
+            print(f"  - {video_file.name}")
+        
+        if len(video_files) == 0:
+            print("⚠️  No video files were saved. Check the render method and RecordVideo wrapper.")
 
     for k, v in stats.items():
         stats[k] = np.mean(v)

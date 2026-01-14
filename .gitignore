@@ -1,4 +1,6 @@
 robocasa_runs/
+eval_logs/
+datasets/
 # C extensions
 *.so
 

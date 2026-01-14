@@ -203,13 +203,11 @@ class Gr00tPolicy(BasePolicy):
         for k, v in observations.items():
             if not isinstance(v, np.ndarray):
                 observations[k] = np.array(v)
-
         # Apply transforms
         normalized_input = self.apply_transforms(observations)
 
         normalized_action = self._get_action_from_normalized_input(normalized_input)
         unnormalized_action = self._get_unnormalized_action(normalized_action)
-
         if not is_batch:
             unnormalized_action = squeeze_dict_values(unnormalized_action)
         return unnormalized_action
