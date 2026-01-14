@@ -85,6 +85,9 @@ class ArgsConfig:
     # Advanced training parameters
     learning_rate: float = 1e-4
     """Learning rate for training."""
+    
+    gradient_accumulation_steps: int = 1
+    """Gradient accumulation steps for training."""
 
     weight_decay: float = 1e-5
     """Weight decay for AdamW optimizer."""
@@ -237,7 +240,7 @@ def main(config: ArgsConfig):
         bf16=True,
         tf32=True,
         per_device_train_batch_size=config.batch_size,
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
         dataloader_num_workers=config.dataloader_num_workers,
         dataloader_pin_memory=False,
         dataloader_persistent_workers=config.dataloader_num_workers > 0,
