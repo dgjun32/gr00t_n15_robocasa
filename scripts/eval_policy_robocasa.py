@@ -220,8 +220,13 @@ if __name__ == "__main__":
         print(f"Video will be saved to: {video_base_path.absolute()}")
         # Record every episode (episode_id starts from 1)
         episode_trigger = lambda t: True  # Record all episodes
-        env = RecordVideo(env, video_base_path, disable_logger=True, episode_trigger=episode_trigger, fps=20)
-        print("RecordVideo wrapper added successfully")
+        try:
+            env = RecordVideo(env, video_base_path, disable_logger=True, episode_trigger=episode_trigger, fps=20)
+            print("RecordVideo wrapper added successfully")
+        except Exception as e:
+            print(f"WARNING: Failed to add RecordVideo wrapper: {e}")
+            print("Continuing without video recording...")
+            record_video = False
 
     env = MultiStepWrapper(
         env,
@@ -258,8 +263,17 @@ if __name__ == "__main__":
     episode_info_list = []
     
     for i in trange(args.num_episodes):
-
-        obs, info = env.reset()
+        print(f"\n{'='*80}")
+        print(f"Starting Episode {i+1}/{args.num_episodes}")
+        print(f"{'='*80}")
+        
+        try:
+            obs, info = env.reset()
+        except Exception as e:
+            print(f"ERROR during env.reset() in episode {i+1}: {e}")
+            import traceback
+            traceback.print_exc()
+            break
         # get initial pose of the robot ############
         unwrapped_env = env.unwrapped
         sim = unwrapped_env.sim
@@ -323,14 +337,31 @@ if __name__ == "__main__":
                 "task_instruction": task_instruction,
                 "is_success": is_success_val,
             })
-        
-        print("--------------------------------")
         print(f"Episode {i+1}: Success = {is_success_val} | Success rate = {success_rate:.3f}")
         
         pbar.close()
+        
+        # Force garbage collection after each episode to prevent memory buildup
+        import gc
+        gc.collect()
+        
+        # Optional: clear CUDA cache if using GPU
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
 
     # Close environment to ensure video is saved
-    env.close()
+    print(f"\nClosing environment after {len(stats['is_success'])} episodes...")
+    try:
+        env.close()
+        print("Environment closed successfully")
+    except Exception as e:
+        print(f"Error closing environment: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Rename videos with custom format after all videos are saved
     if record_video:

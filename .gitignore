@@ -1,6 +1,9 @@
 robocasa_runs/
 eval_logs/
 datasets/
+checkpoints/
+
+robocasa/robocasa/models/assets/
 # C extensions
 *.so
 
