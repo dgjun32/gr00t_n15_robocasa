@@ -2,7 +2,7 @@ robocasa_runs/
 eval_logs/
 datasets/
 checkpoints/
-
+PhysicalAI-Robotics-GR00T-X-Embodiment-Sim
 robocasa/robocasa/models/assets/
 # C extensions
 *.so
@@ -148,7 +148,5 @@ gr00t_ckpt/
 PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/
 
 # robocasa related
-robocasa/
 robosuite/
-
 command
